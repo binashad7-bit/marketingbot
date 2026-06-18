@@ -83,6 +83,14 @@ def init_scheduler():
             name='Find lead emails'
         )
         scheduler.add_job(
+            func=lead_collector.enrich_missing_contact_info,
+            trigger="cron",
+            hour=2,
+            minute=15,
+            id='enrich_contact_info',
+            name='Enrich lead phone and website'
+        )
+        scheduler.add_job(
             func=lead_collector.clean_and_score_leads,
             trigger="cron",
             hour=3,
@@ -164,7 +172,8 @@ def index():
             'lead_collection_status': '/lead-collection/status',
             'stats': '/stats',
             'scheduler_jobs': '/scheduler/jobs',
-            'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets'
+            'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
+            'enrich_contact_info': 'POST /trigger/enrich-contact-info'
         }
     }), 200
 
@@ -217,7 +226,7 @@ def lead_collection_status():
 
         lead_jobs = []
         for job in scheduler.get_jobs():
-            if job.id in ('collect_google_maps', 'collect_facebook', 'find_emails', 'clean_leads', 'sync_leads_to_sheets'):
+            if job.id in ('collect_google_maps', 'collect_facebook', 'find_emails', 'enrich_contact_info', 'clean_leads', 'sync_leads_to_sheets'):
                 lead_jobs.append({
                     'id': job.id,
                     'name': job.name,
@@ -291,7 +300,8 @@ def trigger_enrich_contact_info():
     """Manually enrich existing leads with missing phone, website, and email."""
     try:
         limit = request.json.get('limit', 500) if request.is_json else 500
-        updated = lead_collector.enrich_missing_contact_info(limit=limit)
+        find_email = request.json.get('find_email', False) if request.is_json else False
+        updated = lead_collector.enrich_missing_contact_info(limit=limit, find_email=find_email)
         sheet_result = reporting_manager.sync_leads_to_sheet()
         return jsonify({
             'status': 'success',

@@ -12,6 +12,7 @@ from src.database import Lead, add_lead, db
 import json
 import random
 import re
+from urllib.parse import parse_qs, unquote, urlparse
 
 logger.add("logs/lead_collection.log", rotation="500 MB")
 
@@ -70,7 +71,7 @@ class LeadCollector:
                                 or place_details.get('international_phone_number')
                                 or ''
                             )
-                            website = place_details.get('website', '')
+                            website = self._clean_website_url(place_details.get('website', ''))
                             email = self.find_emails(website, name) if website else None
                             
                             # লিড ডাটাবেসে যোগ করা
@@ -132,7 +133,6 @@ class LeadCollector:
                 return None
             
             # URL থেকে ডোমেইন এক্সট্র্যাক্ট করা
-            from urllib.parse import urlparse
             domain_name = urlparse(domain).netloc
             
             if self.hunter_api_key and Config.EMAIL_FINDER_PROVIDER in ('hunter', 'auto'):
@@ -216,7 +216,30 @@ class LeadCollector:
         logger.info(f"Email enrichment updated {updated} leads")
         return updated
 
-    def enrich_missing_contact_info(self, limit=500):
+    def _clean_website_url(self, url):
+        """Normalize Google Places website URLs before storing them in varchar(255)."""
+        if not url:
+            return ''
+
+        url = str(url).strip()
+        parsed = urlparse(url)
+
+        if parsed.netloc.lower() in {'l.facebook.com', 'lm.facebook.com'}:
+            target = parse_qs(parsed.query).get('u', [''])[0]
+            if target:
+                url = unquote(target).strip()
+                parsed = urlparse(url)
+
+        if not parsed.scheme or not parsed.netloc:
+            return ''
+
+        if len(url) > 255:
+            logger.warning(f"Skipping overlong website URL for storage: {url[:120]}...")
+            return ''
+
+        return url
+
+    def enrich_missing_contact_info(self, limit=500, find_email=False, commit_every=25):
         """Fill missing phone/website/email for existing Google Maps leads."""
         leads = Lead.query.filter(
             Lead.source == 'google_maps',
@@ -225,8 +248,9 @@ class LeadCollector:
 
         updated = 0
         for lead in leads:
+            lead_name = lead.school_name
             try:
-                details = self._lookup_place_details(lead.school_name, lead.district)
+                details = self._lookup_place_details(lead_name, lead.district)
                 if not details:
                     continue
 
@@ -235,7 +259,7 @@ class LeadCollector:
                     or details.get('international_phone_number')
                     or ''
                 )
-                website = details.get('website') or ''
+                website = self._clean_website_url(details.get('website') or '')
                 address = details.get('formatted_address') or ''
 
                 changed = False
@@ -248,18 +272,21 @@ class LeadCollector:
                 if address and not lead.address:
                     lead.address = address
                     changed = True
-                if website and not lead.email:
-                    email = self.find_emails(website, lead.school_name)
+                if find_email and website and not lead.email:
+                    email = self.find_emails(website, lead_name)
                     if email:
                         lead.email = email
                         changed = True
 
                 if changed:
                     updated += 1
+                    if updated % commit_every == 0:
+                        db.session.commit()
 
                 time.sleep(random.uniform(0.2, 0.7))
             except Exception as e:
-                logger.warning(f"Contact enrichment failed for {lead.school_name}: {e}")
+                db.session.rollback()
+                logger.warning(f"Contact enrichment failed for {lead_name}: {e}")
 
         db.session.commit()
         logger.info(f"Contact enrichment updated {updated} leads")
