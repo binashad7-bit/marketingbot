@@ -22,14 +22,19 @@ class ReportGenerator:
     def _authenticate(self):
         """Google Sheets এ সংযোগ করা"""
         try:
-            # নোট: আপনাকে Google Sheets API ক্রেডেনশিয়াল সেটআপ করতে হবে
-            # এর জন্য Google Cloud Console থেকে JSON ফাইল ডাউনলোড করুন
-            
-            # বর্তমানে এটি একটি ডামি সংযোগ
-            # আপনার ক্রেডেনশিয়াল সেট করার পর সক্রিয় করুন
-            
-            logger.info("Google Sheets ক্রেডেনশিয়াল সেটআপ প্রয়োজন")
-            return False
+            credentials = Config.GOOGLE_SHEETS_CREDENTIALS
+            if not credentials or not self.sheet_id:
+                logger.info("Google Sheets credential or sheet id missing; using local report fallback")
+                return False
+
+            if os.path.exists(credentials):
+                client = gspread.service_account(filename=credentials)
+            else:
+                client = gspread.service_account_from_dict(json.loads(credentials))
+
+            self.spreadsheet = client.open_by_key(self.sheet_id)
+            logger.info("Google Sheets authentication successful")
+            return True
         
         except Exception as e:
             logger.warning(f"Google Sheets authentication error: {e}")
@@ -84,8 +89,27 @@ class ReportGenerator:
     def _update_dashboard(self, report):
         """Google Sheets ড্যাশবোর্ড আপডেট করা"""
         try:
-            # যদি Google Sheets সংযোগ সফল হয় তাহলে এটি চালানো হবে
-            # বর্তমানে এটি লোকাল JSON ফাইলে সেভ করছি
+            if self.spreadsheet:
+                worksheet = self.spreadsheet.sheet1
+                if not worksheet.get_all_values():
+                    worksheet.append_row([
+                        'date', 'time', 'total_leads', 'hot_leads', 'warm_leads',
+                        'cold_leads', 'emails_sent', 'emails_opened',
+                        'email_open_rate', 'converted', 'conversion_rate'
+                    ])
+                worksheet.append_row([
+                    report['date'],
+                    report['time'],
+                    report['total_leads'],
+                    report['hot_leads'],
+                    report['warm_leads'],
+                    report['cold_leads'],
+                    report['emails_sent'],
+                    report['emails_opened'],
+                    report['email_open_rate'],
+                    report['converted'],
+                    report['conversion_rate']
+                ])
             
             self._save_to_json(report)
             logger.info("✓ ড্যাশবোর্ড আপডেট করা হয়েছে")

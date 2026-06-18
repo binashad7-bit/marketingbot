@@ -1,6 +1,4 @@
-import sendgrid
-from sendgrid.helpers.mail import Mail, Email, Content, HtmlContent
-from jinja2 import Template
+import requests
 from datetime import datetime
 from loguru import logger
 from config import Config
@@ -17,7 +15,13 @@ class EmailCampaign:
     """ইমেইল ক্যাম্পেইন ম্যানেজার"""
     
     def __init__(self):
-        self.sg = sendgrid.SendGridAPIClient(Config.SENDGRID_API_KEY)
+        self.email_provider = Config.EMAIL_PROVIDER
+        self.brevo_api_key = Config.BREVO_API_KEY
+        self.sendgrid_api_key = Config.SENDGRID_API_KEY
+        self.sg = None
+        if self.email_provider == 'sendgrid':
+            import sendgrid
+            self.sg = sendgrid.SendGridAPIClient(self.sendgrid_api_key)
         self.from_email = Config.FROM_EMAIL
         self.from_name = Config.FROM_NAME
         self.templates_path = 'templates/email/'
@@ -157,19 +161,14 @@ PathshalaPro টিম
     def send_email(self, to_email, subject, html_content, lead_id=None, template_name=None):
         """একটি ইমেইল পাঠানো"""
         try:
-            message = Mail(
-                from_email=Email(self.from_email, self.from_name),
-                to_emails=to_email,
-                subject=subject,
-                html_content=html_content
-            )
-            
-            # ট্র্যাকিং লিঙ্ক যোগ করা
-            message.template_id = None  # SendGrid টেমপ্লেট ব্যবহার করছি না
-            
-            response = self.sg.send(message)
-            
-            logger.info(f"✓ ইমেইল পাঠানো: {to_email} (Status: {response.status_code})")
+            if self.email_provider == 'brevo':
+                response_status = self._send_with_brevo(to_email, subject, html_content, lead_id, template_name)
+            elif self.email_provider == 'sendgrid':
+                response_status = self._send_with_sendgrid(to_email, subject, html_content)
+            else:
+                raise ValueError(f"Unsupported EMAIL_PROVIDER: {self.email_provider}")
+
+            logger.info(f"✓ ইমেইল পাঠানো: {to_email} (Status: {response_status})")
             
             # লগ রেকর্ড করা
             if lead_id:
@@ -184,7 +183,63 @@ PathshalaPro টিম
         
         except Exception as e:
             logger.error(f"Email sending error ({to_email}): {e}")
+            if lead_id:
+                log_email_event(
+                    lead_id=lead_id,
+                    subject=subject,
+                    status='failed',
+                    template=template_name,
+                    error_message=str(e)
+                )
             return False
+
+    def _send_with_brevo(self, to_email, subject, html_content, lead_id=None, template_name=None):
+        """Brevo transactional email API দিয়ে পাঠানো"""
+        if not self.brevo_api_key:
+            raise ValueError("BREVO_API_KEY is not configured")
+
+        payload = {
+            'sender': {
+                'email': self.from_email,
+                'name': self.from_name
+            },
+            'to': [{'email': to_email}],
+            'subject': subject,
+            'htmlContent': html_content
+        }
+        tags = [tag for tag in [template_name, f'lead-{lead_id}' if lead_id else None] if tag]
+        if tags:
+            payload['tags'] = tags
+
+        response = requests.post(
+            'https://api.brevo.com/v3/smtp/email',
+            headers={
+                'accept': 'application/json',
+                'api-key': self.brevo_api_key,
+                'content-type': 'application/json'
+            },
+            json=payload,
+            timeout=20
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Brevo API error {response.status_code}: {response.text}")
+        return response.status_code
+
+    def _send_with_sendgrid(self, to_email, subject, html_content):
+        """পুরোনো SendGrid path রাখতে optional fallback"""
+        if not self.sendgrid_api_key:
+            raise ValueError("SENDGRID_API_KEY is not configured")
+
+        from sendgrid.helpers.mail import Mail, Email
+
+        message = Mail(
+            from_email=Email(self.from_email, self.from_name),
+            to_emails=to_email,
+            subject=subject,
+            html_content=html_content
+        )
+        response = self.sg.send(message)
+        return response.status_code
     
     
     def _personalize_template(self, template_text, lead):

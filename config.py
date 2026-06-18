@@ -5,20 +5,34 @@ from datetime import datetime
 # .env ফাইল লোড করা
 load_dotenv()
 
+
+def normalize_database_url(url):
+    """SQLAlchemy-এর জন্য PostgreSQL URL driver ঠিক করা"""
+    if url.startswith('postgres://'):
+        url = 'postgresql://' + url[len('postgres://'):]
+    if url.startswith('postgresql://'):
+        return 'postgresql+psycopg://' + url[len('postgresql://'):]
+    return url
+
+
 class Config:
     """বেস কনফিগারেশন"""
     
     # Database
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'postgresql://localhost/pathshalapro_bot')
+    SQLALCHEMY_DATABASE_URI = normalize_database_url(
+        os.getenv('DATABASE_URL', 'postgresql://localhost/pathshalapro_bot')
+    )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
     # API Keys
     GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY')
     SENDGRID_API_KEY = os.getenv('SENDGRID_API_KEY')
+    BREVO_API_KEY = os.getenv('BREVO_API_KEY')
     TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
     TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
     TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
     HUNTER_API_KEY = os.getenv('HUNTER_API_KEY')
+    EMAIL_FINDER_PROVIDER = os.getenv('EMAIL_FINDER_PROVIDER', 'website').lower()
     
     # Facebook
     FACEBOOK_PAGE_ID = os.getenv('FACEBOOK_PAGE_ID')
@@ -30,10 +44,12 @@ class Config:
     GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
     
     # Email Settings
+    EMAIL_PROVIDER = os.getenv('EMAIL_PROVIDER', 'brevo').lower()
     FROM_EMAIL = os.getenv('FROM_EMAIL', 'marketing@pathshalapro.net')
     FROM_NAME = os.getenv('FROM_NAME', 'PathshalaPro Marketing Team')
     
     # WhatsApp Settings
+    WHATSAPP_PROVIDER = os.getenv('WHATSAPP_PROVIDER', 'twilio').lower()
     WHATSAPP_FROM_NUMBER = os.getenv('WHATSAPP_FROM_NUMBER')
     
     # General Settings

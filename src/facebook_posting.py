@@ -3,6 +3,8 @@ from datetime import datetime
 from loguru import logger
 from config import Config
 from src.database import db
+import json
+import os
 
 logger.add("logs/facebook_posting.log", rotation="500 MB")
 
@@ -19,6 +21,11 @@ class FacebookPoster:
     def post_to_facebook(self, content_text, image_url=None):
         """ফেসবুকে একটি পোস্ট করা"""
         try:
+            if not self.page_id or not self.access_token:
+                post_id = self._queue_post(content_text, image_url)
+                logger.warning(f"Facebook credential missing; queued post {post_id}")
+                return True, post_id
+
             url = f"https://graph.facebook.com/{self.api_version}/{self.page_id}/feed"
             
             if image_url:
@@ -48,6 +55,32 @@ class FacebookPoster:
         except Exception as e:
             logger.error(f"Facebook posting error: {e}")
             return False, None
+
+    def _queue_post(self, content_text, image_url=None):
+        """Facebook token না থাকলে post content local outbox-এ রাখা"""
+        os.makedirs('reports', exist_ok=True)
+        outbox_file = 'reports/facebook_post_outbox.json'
+        post_id = f"queued-facebook-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        queued = []
+
+        if os.path.exists(outbox_file):
+            try:
+                with open(outbox_file, 'r', encoding='utf-8') as f:
+                    queued = json.load(f)
+            except Exception:
+                queued = []
+
+        queued.append({
+            'id': post_id,
+            'content': content_text,
+            'image_url': image_url,
+            'created_at': datetime.utcnow().isoformat()
+        })
+
+        with open(outbox_file, 'w', encoding='utf-8') as f:
+            json.dump(queued, f, ensure_ascii=False, indent=2)
+
+        return post_id
     
     
     def get_scheduled_posts(self):

@@ -5,6 +5,8 @@ from config import Config
 from src.database import (
     Lead, update_lead_status, log_whatsapp_event, db
 )
+import csv
+import os
 
 logger.add("logs/whatsapp_campaign.log", rotation="500 MB")
 
@@ -13,15 +15,23 @@ class WhatsAppCampaign:
     """হোয়াটসঅ্যাপ মেসেজিং ক্যাম্পেইন"""
     
     def __init__(self):
+        self.provider = Config.WHATSAPP_PROVIDER
         self.account_sid = Config.TWILIO_ACCOUNT_SID
         self.auth_token = Config.TWILIO_AUTH_TOKEN
         self.whatsapp_from = Config.TWILIO_WHATSAPP_NUMBER
-        self.client = Client(self.account_sid, self.auth_token)
+        self.client = None
+        if self.provider == 'twilio' and self.account_sid and self.auth_token:
+            self.client = Client(self.account_sid, self.auth_token)
     
     
     def send_message(self, phone_number, message_text, lead_id=None):
         """একটি হোয়াটসঅ্যাপ মেসেজ পাঠানো"""
         try:
+            if not self.client or not self.whatsapp_from:
+                sid = self._queue_message(phone_number, message_text, lead_id)
+                logger.warning(f"WhatsApp credential missing; queued message for {phone_number}")
+                return True, sid
+
             # ফোন নম্বর ফরম্যাট করা (Bangladesh format)
             if phone_number.startswith('0'):
                 phone_number = '+880' + phone_number[1:]
@@ -60,6 +70,36 @@ class WhatsAppCampaign:
                 )
             
             return False, None
+
+    def _queue_message(self, phone_number, message_text, lead_id=None):
+        """Twilio/Meta credentials না থাকলে মেসেজ local outbox-এ রাখা"""
+        os.makedirs('reports', exist_ok=True)
+        outbox_file = 'reports/whatsapp_outbox.csv'
+        file_exists = os.path.exists(outbox_file)
+        queued_id = f"queued-{lead_id or 'unknown'}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+        with open(outbox_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                'queued_id', 'lead_id', 'phone_number', 'message', 'created_at'
+            ])
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                'queued_id': queued_id,
+                'lead_id': lead_id or '',
+                'phone_number': phone_number,
+                'message': message_text,
+                'created_at': datetime.utcnow().isoformat()
+            })
+
+        if lead_id:
+            log_whatsapp_event(
+                lead_id=lead_id,
+                message=message_text,
+                status='queued',
+                message_sid=queued_id
+            )
+        return queued_id
     
     
     def send_campaign(self):

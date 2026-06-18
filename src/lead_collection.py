@@ -8,9 +8,10 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from loguru import logger
 from config import Config
-from src.database import add_lead, db
+from src.database import Lead, add_lead, db
 import json
 import random
+import re
 
 logger.add("logs/lead_collection.log", rotation="500 MB")
 
@@ -66,13 +67,14 @@ class LeadCollector:
                             
                             phone = place_details.get('phone_number', '')
                             website = place_details.get('website', '')
+                            email = self.find_emails(website, name) if website else None
                             
                             # লিড ডাটাবেসে যোগ করা
                             if name and (phone or address):
                                 lead = add_lead(
                                     school_name=name,
                                     phone=phone.replace('+880', '0') if phone else None,
-                                    email=None,
+                                    email=email,
                                     district=district,
                                     type=self._identify_type(keyword),
                                     source='google_maps',
@@ -120,7 +122,7 @@ class LeadCollector:
     
     
     def find_emails(self, domain, school_name=None):
-        """Hunter.io ব্যবহার করে ইমেইল খুঁজে পাওয়া"""
+        """Hunter.io বা public website scrape করে ইমেইল খুঁজে পাওয়া"""
         try:
             if not domain or not domain.startswith('http'):
                 return None
@@ -129,27 +131,86 @@ class LeadCollector:
             from urllib.parse import urlparse
             domain_name = urlparse(domain).netloc
             
-            url = "https://api.hunter.io/v2/domain-search"
-            params = {
-                'domain': domain_name,
-                'limit': 10,
-                'api_key': self.hunter_api_key
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            data = response.json()
-            
-            if data.get('data'):
-                emails = data['data'].get('emails', [])
-                if emails:
-                    # প্রথম ইমেইল রিটার্ন করা
-                    return emails[0]['value']
-            
-            return None
+            if self.hunter_api_key and Config.EMAIL_FINDER_PROVIDER in ('hunter', 'auto'):
+                hunter_email = self._find_email_with_hunter(domain_name)
+                if hunter_email:
+                    return hunter_email
+
+            return self._find_email_from_website(domain)
         
         except Exception as e:
             logger.warning(f"Email finder error: {e}")
             return None
+
+    def _find_email_with_hunter(self, domain_name):
+        """Hunter API থাকলে domain search করা"""
+        url = "https://api.hunter.io/v2/domain-search"
+        params = {
+            'domain': domain_name,
+            'limit': 10,
+            'api_key': self.hunter_api_key
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+
+        if data.get('data'):
+            emails = data['data'].get('emails', [])
+            if emails:
+                return emails[0]['value']
+        return None
+
+    def _find_email_from_website(self, website):
+        """Public website pages থেকে mailto/text email খোঁজা"""
+        candidates = [website.rstrip('/')]
+        for path in ('contact', 'contact-us', 'about', 'about-us'):
+            candidates.append(f"{website.rstrip('/')}/{path}")
+
+        email_pattern = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.IGNORECASE)
+        blocked_domains = {'example.com', 'domain.com'}
+
+        for url in candidates:
+            try:
+                response = requests.get(
+                    url,
+                    timeout=10,
+                    headers={'User-Agent': 'Mozilla/5.0 PathshalaPro lead enrichment'}
+                )
+                if response.status_code >= 400:
+                    continue
+
+                emails = []
+                soup = BeautifulSoup(response.text, 'html.parser')
+                for link in soup.select('a[href^="mailto:"]'):
+                    emails.extend(email_pattern.findall(link.get('href', '')))
+                emails.extend(email_pattern.findall(response.text))
+
+                for email in emails:
+                    email_domain = email.split('@')[-1].lower()
+                    if email_domain not in blocked_domains and not email.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                        return email
+            except Exception as e:
+                logger.debug(f"Website email lookup failed for {url}: {e}")
+
+        return None
+
+    def enrich_missing_emails(self, limit=50):
+        """Website আছে কিন্তু email নেই এমন leads enrich করা"""
+        leads = Lead.query.filter(
+            Lead.email == None,
+            Lead.website != None
+        ).limit(limit).all()
+
+        updated = 0
+        for lead in leads:
+            email = self.find_emails(lead.website, lead.school_name)
+            if email:
+                lead.email = email
+                updated += 1
+
+        db.session.commit()
+        logger.info(f"Email enrichment updated {updated} leads")
+        return updated
     
     
     def collect_from_linkedin(self):

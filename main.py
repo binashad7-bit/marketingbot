@@ -61,7 +61,7 @@ def init_scheduler():
     
     # Email খুঁজে পাওয়া (রাত २:००AM)
     scheduler.add_job(
-        func=lambda: logger.info("Email খুঁজে পাওয়ার টাস্ক চলছে"),
+        func=lead_collector.enrich_missing_emails,
         trigger="cron",
         hour=2,
         minute=0,
