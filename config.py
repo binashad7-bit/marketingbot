@@ -41,6 +41,8 @@ class Config:
     
     # Google Sheets
     GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
+    GOOGLE_SHEETS_AUTH_METHOD = os.getenv('GOOGLE_SHEETS_AUTH_METHOD', 'auto').lower()
+    GOOGLE_SHEETS_OAUTH_TOKEN = os.getenv('GOOGLE_SHEETS_OAUTH_TOKEN')
     GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
     
     # Email Settings

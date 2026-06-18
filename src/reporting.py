@@ -1,5 +1,6 @@
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from datetime import datetime
 from loguru import logger
 from src.database import Lead, get_stats
@@ -22,15 +23,20 @@ class ReportGenerator:
     def _authenticate(self):
         """Google Sheets এ সংযোগ করা"""
         try:
-            credentials = Config.GOOGLE_SHEETS_CREDENTIALS
-            if not credentials or not self.sheet_id:
-                logger.info("Google Sheets credential or sheet id missing; using local report fallback")
+            if not self.sheet_id:
+                logger.info("Google Sheet id missing; using local report fallback")
                 return False
 
-            if os.path.exists(credentials):
-                client = gspread.service_account(filename=credentials)
-            else:
-                client = gspread.service_account_from_dict(json.loads(credentials))
+            client = None
+            if Config.GOOGLE_SHEETS_AUTH_METHOD in ('auto', 'service_account'):
+                client = self._authenticate_service_account()
+
+            if not client and Config.GOOGLE_SHEETS_AUTH_METHOD in ('auto', 'oauth'):
+                client = self._authenticate_oauth()
+
+            if not client:
+                logger.info("Google Sheets credentials missing; using local report fallback")
+                return False
 
             self.spreadsheet = client.open_by_key(self.sheet_id)
             logger.info("Google Sheets authentication successful")
@@ -39,6 +45,39 @@ class ReportGenerator:
         except Exception as e:
             logger.warning(f"Google Sheets authentication error: {e}")
             return False
+
+    def _load_json_config(self, value):
+        """Config value can be a JSON string or a path to a JSON file."""
+        if not value:
+            return None, None
+        if os.path.exists(value):
+            with open(value, 'r', encoding='utf-8') as f:
+                return json.load(f), value
+        return json.loads(value), None
+
+    def _authenticate_service_account(self):
+        credentials, _ = self._load_json_config(Config.GOOGLE_SHEETS_CREDENTIALS)
+        if not credentials:
+            return None
+        return gspread.service_account_from_dict(credentials)
+
+    def _authenticate_oauth(self):
+        token_info, token_path = self._load_json_config(Config.GOOGLE_SHEETS_OAUTH_TOKEN)
+        if not token_info:
+            return None
+
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive.file'
+        ]
+        credentials = Credentials.from_authorized_user_info(token_info, scopes=scopes)
+        if credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+            if token_path:
+                with open(token_path, 'w', encoding='utf-8') as f:
+                    f.write(credentials.to_json())
+
+        return gspread.authorize(credentials)
     
     
     def generate_daily_report(self):
