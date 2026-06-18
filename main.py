@@ -90,6 +90,14 @@ def init_scheduler():
             id='clean_leads',
             name='Clean and score leads'
         )
+        scheduler.add_job(
+            func=reporting_manager.sync_leads_to_sheet,
+            trigger="cron",
+            hour=3,
+            minute=15,
+            id='sync_leads_to_sheets',
+            name='Sync leads to Google Sheets'
+        )
 
     if marketing_enabled:
         scheduler.add_job(
@@ -155,7 +163,8 @@ def index():
             'health': '/health',
             'lead_collection_status': '/lead-collection/status',
             'stats': '/stats',
-            'scheduler_jobs': '/scheduler/jobs'
+            'scheduler_jobs': '/scheduler/jobs',
+            'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets'
         }
     }), 200
 
@@ -208,7 +217,7 @@ def lead_collection_status():
 
         lead_jobs = []
         for job in scheduler.get_jobs():
-            if job.id in ('collect_google_maps', 'collect_facebook', 'find_emails', 'clean_leads'):
+            if job.id in ('collect_google_maps', 'collect_facebook', 'find_emails', 'clean_leads', 'sync_leads_to_sheets'):
                 lead_jobs.append({
                     'id': job.id,
                     'name': job.name,
@@ -250,6 +259,24 @@ def trigger_lead_collection():
         }), 200
     except Exception as e:
         logger.error(f"Trigger error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/trigger/sync-leads-to-sheets', methods=['POST'])
+def trigger_sync_leads_to_sheets():
+    """Manually sync collected leads to the Leads worksheet."""
+    try:
+        result = reporting_manager.sync_leads_to_sheet()
+        return jsonify({
+            'status': 'success',
+            'data': result,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Lead sheet sync trigger error: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)

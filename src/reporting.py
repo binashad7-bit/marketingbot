@@ -161,6 +161,65 @@ class ReportGenerator:
         except Exception as e:
             logger.error(f"Dashboard update error: {e}")
             return False
+
+    def sync_leads_to_sheet(self):
+        """Write all collected leads to a dedicated Google Sheets worksheet."""
+        try:
+            if not self.spreadsheet:
+                logger.info("Google Sheets not connected; skipping lead sync")
+                return {'synced': 0, 'worksheet': None}
+
+            leads = Lead.query.order_by(Lead.created_at.desc()).all()
+            worksheet = self._get_or_create_worksheet('Leads')
+            rows = [self._lead_sheet_headers()]
+
+            for lead in leads:
+                rows.append([
+                    lead.id,
+                    lead.school_name or '',
+                    lead.type or '',
+                    lead.district or '',
+                    lead.phone or '',
+                    lead.email or '',
+                    lead.website or '',
+                    lead.address or '',
+                    lead.source or '',
+                    lead.score or 0,
+                    lead.segment or '',
+                    lead.status or '',
+                    self._format_dt(lead.created_at),
+                    self._format_dt(lead.updated_at)
+                ])
+
+            worksheet.clear()
+            if rows:
+                worksheet.update('A1', rows, value_input_option='USER_ENTERED')
+                try:
+                    worksheet.freeze(rows=1)
+                except Exception as e:
+                    logger.debug(f"Could not freeze lead sheet header: {e}")
+
+            logger.info(f"Google Sheets lead sync complete: {len(leads)} leads")
+            return {'synced': len(leads), 'worksheet': worksheet.title}
+        except Exception as e:
+            logger.error(f"Google Sheets lead sync error: {e}")
+            return {'synced': 0, 'worksheet': None, 'error': str(e)}
+
+    def _get_or_create_worksheet(self, title):
+        try:
+            return self.spreadsheet.worksheet(title)
+        except gspread.WorksheetNotFound:
+            return self.spreadsheet.add_worksheet(title=title, rows=1000, cols=20)
+
+    def _lead_sheet_headers(self):
+        return [
+            'id', 'school_name', 'type', 'district', 'phone', 'email',
+            'website', 'address', 'source', 'score', 'segment', 'status',
+            'created_at', 'updated_at'
+        ]
+
+    def _format_dt(self, value):
+        return value.isoformat() if value else ''
     
     
     def _save_to_json(self, report):
@@ -299,6 +358,9 @@ class ReportingManager:
             'weekly': weekly,
             'monthly': monthly
         }
+
+    def sync_leads_to_sheet(self):
+        return self.generator.sync_leads_to_sheet()
 
 
 # সিঙ্গেল ইনস্ট্যান্স
