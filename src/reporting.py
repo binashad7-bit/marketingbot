@@ -57,8 +57,12 @@ class ReportGenerator:
             # ড্যাশবোর্ড আপডেট করা
             self._update_dashboard(report)
             
-            # কনসোলে প্রিন্ট করা
-            self._print_report(report)
+            # কনসোলে প্রিন্ট করা. Windows/non-UTF terminals may reject Bangla text,
+            # so console rendering should not fail report generation.
+            try:
+                self._print_report(report)
+            except UnicodeEncodeError as e:
+                logger.warning(f"Console report print skipped due to encoding error: {e}")
             
             logger.info("✓ দৈনিক রিপোর্ট সফল")
             return report
