@@ -167,7 +167,7 @@ class LeadCollector:
     def _find_email_from_website(self, website):
         """Public website pages থেকে mailto/text email খোঁজা"""
         candidates = [website.rstrip('/')]
-        for path in ('contact', 'contact-us', 'about', 'about-us'):
+        for path in ('contact', 'about'):
             candidates.append(f"{website.rstrip('/')}/{path}")
 
         email_pattern = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.IGNORECASE)
@@ -177,7 +177,7 @@ class LeadCollector:
             try:
                 response = requests.get(
                     url,
-                    timeout=10,
+                    timeout=4,
                     headers={'User-Agent': 'Mozilla/5.0 PathshalaPro lead enrichment'}
                 )
                 if response.status_code >= 400:
@@ -211,6 +211,7 @@ class LeadCollector:
             if email:
                 lead.email = email
                 updated += 1
+                db.session.commit()
 
         db.session.commit()
         logger.info(f"Email enrichment updated {updated} leads")
