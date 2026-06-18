@@ -231,6 +231,9 @@ def lead_collection_status():
             'mode': Config.SCHEDULER_MODE,
             'timezone': Config.SCHEDULER_TIMEZONE,
             'total_leads': Lead.query.count(),
+            'leads_with_phone': Lead.query.filter(Lead.phone != None, Lead.phone != '').count(),
+            'leads_with_email': Lead.query.filter(Lead.email != None, Lead.email != '').count(),
+            'leads_with_website': Lead.query.filter(Lead.website != None, Lead.website != '').count(),
             'leads_last_24h': Lead.query.filter(Lead.created_at >= last_24h).count(),
             'leads_last_7d': Lead.query.filter(Lead.created_at >= last_7d).count(),
             'last_lead_at': latest_lead.created_at.isoformat() if latest_lead else None,
@@ -277,6 +280,27 @@ def trigger_sync_leads_to_sheets():
         }), 200
     except Exception as e:
         logger.error(f"Lead sheet sync trigger error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/trigger/enrich-contact-info', methods=['POST'])
+def trigger_enrich_contact_info():
+    """Manually enrich existing leads with missing phone, website, and email."""
+    try:
+        limit = request.json.get('limit', 500) if request.is_json else 500
+        updated = lead_collector.enrich_missing_contact_info(limit=limit)
+        sheet_result = reporting_manager.sync_leads_to_sheet()
+        return jsonify({
+            'status': 'success',
+            'updated': updated,
+            'sheet_sync': sheet_result,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Contact enrichment trigger error: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)

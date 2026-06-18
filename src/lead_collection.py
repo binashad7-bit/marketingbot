@@ -58,14 +58,18 @@ class LeadCollector:
                             details_url = "https://maps.googleapis.com/maps/api/place/details/json"
                             details_params = {
                                 'place_id': place_id,
-                                'fields': 'phone_number,website,formatted_address',
+                                'fields': 'formatted_phone_number,international_phone_number,website,formatted_address',
                                 'key': self.google_maps_api_key
                             }
                             
                             details_response = requests.get(details_url, params=details_params, timeout=10)
                             place_details = details_response.json().get('result', {})
                             
-                            phone = place_details.get('phone_number', '')
+                            phone = (
+                                place_details.get('formatted_phone_number')
+                                or place_details.get('international_phone_number')
+                                or ''
+                            )
                             website = place_details.get('website', '')
                             email = self.find_emails(website, name) if website else None
                             
@@ -211,6 +215,86 @@ class LeadCollector:
         db.session.commit()
         logger.info(f"Email enrichment updated {updated} leads")
         return updated
+
+    def enrich_missing_contact_info(self, limit=500):
+        """Fill missing phone/website/email for existing Google Maps leads."""
+        leads = Lead.query.filter(
+            Lead.source == 'google_maps',
+            (Lead.phone == None) | (Lead.phone == '') | (Lead.website == None) | (Lead.website == '')
+        ).limit(limit).all()
+
+        updated = 0
+        for lead in leads:
+            try:
+                details = self._lookup_place_details(lead.school_name, lead.district)
+                if not details:
+                    continue
+
+                phone = (
+                    details.get('formatted_phone_number')
+                    or details.get('international_phone_number')
+                    or ''
+                )
+                website = details.get('website') or ''
+                address = details.get('formatted_address') or ''
+
+                changed = False
+                if phone and not lead.phone:
+                    lead.phone = phone.replace('+880', '0').strip()
+                    changed = True
+                if website and not lead.website:
+                    lead.website = website
+                    changed = True
+                if address and not lead.address:
+                    lead.address = address
+                    changed = True
+                if website and not lead.email:
+                    email = self.find_emails(website, lead.school_name)
+                    if email:
+                        lead.email = email
+                        changed = True
+
+                if changed:
+                    updated += 1
+
+                time.sleep(random.uniform(0.2, 0.7))
+            except Exception as e:
+                logger.warning(f"Contact enrichment failed for {lead.school_name}: {e}")
+
+        db.session.commit()
+        logger.info(f"Contact enrichment updated {updated} leads")
+        return updated
+
+    def _lookup_place_details(self, school_name, district):
+        if not school_name:
+            return None
+
+        query = f"{school_name}, {district}, Bangladesh" if district else f"{school_name}, Bangladesh"
+        search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+        search_response = requests.get(
+            search_url,
+            params={'query': query, 'key': self.google_maps_api_key},
+            timeout=10
+        )
+        results = search_response.json().get('results', [])
+        if not results:
+            return None
+
+        place_id = results[0].get('place_id')
+        if not place_id:
+            return None
+
+        details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+        details_response = requests.get(
+            details_url,
+            params={
+                'place_id': place_id,
+                'fields': 'formatted_phone_number,international_phone_number,website,formatted_address',
+                'key': self.google_maps_api_key
+            },
+            timeout=10
+        )
+        return details_response.json().get('result', {})
     
     
     def collect_from_linkedin(self):
