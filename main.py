@@ -143,6 +143,23 @@ def init_scheduler():
 
 # ======== FLASK ROUTES ========
 
+@app.route('/', methods=['GET'])
+def index():
+    """Basic service overview with monitoring links."""
+    return jsonify({
+        'service': 'marketingbot',
+        'status': 'running',
+        'mode': Config.SCHEDULER_MODE,
+        'timezone': Config.SCHEDULER_TIMEZONE,
+        'endpoints': {
+            'health': '/health',
+            'lead_collection_status': '/lead-collection/status',
+            'stats': '/stats',
+            'scheduler_jobs': '/scheduler/jobs'
+        }
+    }), 200
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """হেলথ চেক এন্ডপয়েন্ট"""
