@@ -4,10 +4,10 @@ from flask_sqlalchemy import SQLAlchemy
 from apscheduler.schedulers.background import BackgroundScheduler
 from loguru import logger
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import Config, get_config
-from src.database import db, init_db, get_stats
+from src.database import Lead, db, init_db, get_stats
 from src.lead_collection import lead_collector
 from src.email_campaign import email_campaign
 from src.whatsapp_campaign import whatsapp_campaign
@@ -27,122 +27,117 @@ app.config.from_object(get_config())
 db.init_app(app)
 
 # Scheduler সেটআপ
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone=Config.SCHEDULER_TIMEZONE)
 
 # পোর্ট সেটআপ
 PORT = os.getenv('PORT', 5000)
 
 
 def init_scheduler():
-    """স্বয়ংক্রিয় টাস্ক সময়সূচী সেটআপ করা"""
+    """Set up scheduled jobs based on the configured scheduler mode."""
     if scheduler.running:
-        logger.info("শিডিউলার ইতিমধ্যে চালু আছে")
+        logger.info("Scheduler is already running")
         return
 
-    logger.info("শিডিউলার সেটআপ করছি...")
-    
-    # ======== রাত্রিকালীন লিড সংগ্রহ ========
-    
-    # Google Maps থেকে লিড সংগ্রহ (রাত ১ AM)
-    scheduler.add_job(
-        func=lead_collector.collect_from_google_maps,
-        trigger="cron",
-        hour=1,
-        minute=0,
-        id='collect_google_maps',
-        name='Google Maps থেকে লিড সংগ্রহ'
+    logger.info(
+        f"Setting up scheduler: mode={Config.SCHEDULER_MODE}, "
+        f"timezone={Config.SCHEDULER_TIMEZONE}"
     )
-    
-    # Facebook গ্রুপ থেকে লিড সংগ্রহ (রাত ১:३० AM)
-    scheduler.add_job(
-        func=lead_collector.collect_from_facebook_groups,
-        trigger="cron",
-        hour=1,
-        minute=30,
-        id='collect_facebook',
-        name='Facebook গ্রুপ থেকে লিড সংগ্রহ'
+
+    lead_collection_enabled = (
+        Config.ENABLE_LEAD_COLLECTION
+        and Config.SCHEDULER_MODE in ('all', 'lead_collection')
     )
-    
-    # Email খুঁজে পাওয়া (রাত २:००AM)
-    scheduler.add_job(
-        func=lead_collector.enrich_missing_emails,
-        trigger="cron",
-        hour=2,
-        minute=0,
-        id='find_emails',
-        name='Email খুঁজে পাওয়া'
+    marketing_enabled = (
+        Config.ENABLE_MARKETING_JOBS
+        and Config.SCHEDULER_MODE in ('all', 'marketing')
     )
-    
-    # Data Cleaning (রাত ३:००AM)
-    scheduler.add_job(
-        func=lead_collector.clean_and_score_leads,
-        trigger="cron",
-        hour=3,
-        minute=0,
-        id='clean_leads',
-        name='লিড ক্লিনিং এবং স্কোরিং'
+    reporting_enabled = (
+        Config.ENABLE_REPORTING_JOBS
+        and Config.SCHEDULER_MODE in ('all', 'reporting')
     )
-    
-    # ======== সকালের এনগেজমেন্ট ========
-    
-    # ইমেইল ক্যাম্পেইন (সকাল १०:३०AM)
-    scheduler.add_job(
-        func=email_campaign.run_campaign,
-        trigger="cron",
-        hour=10,
-        minute=30,
-        id='email_campaign',
-        name='ইমেইল ক্যাম্পেইন'
-    )
-    
-    # হোয়াটসঅ্যাপ ক্যাম্পেইন (দুপুর १२:३०PM)
-    scheduler.add_job(
-        func=whatsapp_campaign.send_campaign,
-        trigger="cron",
-        hour=12,
-        minute=30,
-        id='whatsapp_campaign',
-        name='হোয়াটসঅ্যাপ মেসেজিং'
-    )
-    
-    # ফেসবুক পোস্টিং (দুপুর २:००PM)
-    scheduler.add_job(
-        func=facebook_poster.post_daily_content,
-        trigger="cron",
-        hour=14,
-        minute=0,
-        id='facebook_posting',
-        name='ফেসবুক পোস্টিং'
-    )
-    
-    # ======== ট্র্যাকিং ========
-    
-    # ইমেইল ট্র্যাকিং (রাত ८:००PM)
-    scheduler.add_job(
-        func=tracking_manager.run_all,
-        trigger="cron",
-        hour=20,
-        minute=0,
-        id='tracking',
-        name='ট্র্যাকিং এবং মেট্রিক্স'
-    )
-    
-    # ======== রিপোর্টিং ========
-    
-    # দৈনিক রিপোর্ট (রাত ९:३०PM)
-    scheduler.add_job(
-        func=reporting_manager.run_daily,
-        trigger="cron",
-        hour=21,
-        minute=30,
-        id='daily_report',
-        name='দৈনিক রিপোর্ট'
-    )
-    
+
+    if lead_collection_enabled:
+        scheduler.add_job(
+            func=lead_collector.collect_from_google_maps,
+            trigger="cron",
+            hour=1,
+            minute=0,
+            id='collect_google_maps',
+            name='Google Maps lead collection'
+        )
+        scheduler.add_job(
+            func=lead_collector.collect_from_facebook_groups,
+            trigger="cron",
+            hour=1,
+            minute=30,
+            id='collect_facebook',
+            name='Facebook group lead collection'
+        )
+        scheduler.add_job(
+            func=lead_collector.enrich_missing_emails,
+            trigger="cron",
+            hour=2,
+            minute=0,
+            id='find_emails',
+            name='Find lead emails'
+        )
+        scheduler.add_job(
+            func=lead_collector.clean_and_score_leads,
+            trigger="cron",
+            hour=3,
+            minute=0,
+            id='clean_leads',
+            name='Clean and score leads'
+        )
+
+    if marketing_enabled:
+        scheduler.add_job(
+            func=email_campaign.run_campaign,
+            trigger="cron",
+            hour=10,
+            minute=30,
+            id='email_campaign',
+            name='Email campaign'
+        )
+        scheduler.add_job(
+            func=whatsapp_campaign.send_campaign,
+            trigger="cron",
+            hour=12,
+            minute=30,
+            id='whatsapp_campaign',
+            name='WhatsApp campaign'
+        )
+        scheduler.add_job(
+            func=facebook_poster.post_daily_content,
+            trigger="cron",
+            hour=14,
+            minute=0,
+            id='facebook_posting',
+            name='Facebook posting'
+        )
+        scheduler.add_job(
+            func=tracking_manager.run_all,
+            trigger="cron",
+            hour=20,
+            minute=0,
+            id='tracking',
+            name='Tracking and metrics'
+        )
+
+    if reporting_enabled:
+        scheduler.add_job(
+            func=reporting_manager.run_daily,
+            trigger="cron",
+            hour=21,
+            minute=30,
+            id='daily_report',
+            name='Daily report'
+        )
+
     scheduler.start()
-    logger.info("✓ শিডিউলার সফলভাবে সেটআপ করা হয়েছে")
-    
-    # প্রোগ্রাম শেষ হলে শিডিউলার বন্ধ করা
+    logger.info(f"Scheduler started with {len(scheduler.get_jobs())} jobs")
+
     atexit.register(lambda: scheduler.shutdown())
 
 
@@ -170,6 +165,56 @@ def get_statistics():
         }), 200
     except Exception as e:
         logger.error(f"Stats error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/lead-collection/status', methods=['GET'])
+def lead_collection_status():
+    """Public-safe lead collection monitoring without exposing lead contact data."""
+    try:
+        now = datetime.utcnow()
+        last_24h = now - timedelta(hours=24)
+        last_7d = now - timedelta(days=7)
+
+        latest_lead = Lead.query.order_by(Lead.created_at.desc()).first()
+        sources = {}
+        districts = {}
+
+        for source, count in db.session.query(Lead.source, db.func.count(Lead.id)).group_by(Lead.source):
+            sources[source or 'unknown'] = count
+
+        for district, count in db.session.query(Lead.district, db.func.count(Lead.id)).group_by(Lead.district):
+            districts[district or 'unknown'] = count
+
+        lead_jobs = []
+        for job in scheduler.get_jobs():
+            if job.id in ('collect_google_maps', 'collect_facebook', 'find_emails', 'clean_leads'):
+                lead_jobs.append({
+                    'id': job.id,
+                    'name': job.name,
+                    'next_run_time': str(job.next_run_time) if job.next_run_time else None,
+                    'trigger': str(job.trigger)
+                })
+
+        return jsonify({
+            'status': 'success',
+            'scheduler': 'running' if scheduler.running else 'stopped',
+            'mode': Config.SCHEDULER_MODE,
+            'timezone': Config.SCHEDULER_TIMEZONE,
+            'total_leads': Lead.query.count(),
+            'leads_last_24h': Lead.query.filter(Lead.created_at >= last_24h).count(),
+            'leads_last_7d': Lead.query.filter(Lead.created_at >= last_7d).count(),
+            'last_lead_at': latest_lead.created_at.isoformat() if latest_lead else None,
+            'source_counts': sources,
+            'district_counts': districts,
+            'lead_jobs': lead_jobs,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Lead collection status error: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)

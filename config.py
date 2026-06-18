@@ -59,6 +59,13 @@ class Config:
     DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     PORT = int(os.getenv('PORT', 5000))
+
+    # Scheduler Settings
+    SCHEDULER_TIMEZONE = os.getenv('SCHEDULER_TIMEZONE', 'UTC')
+    SCHEDULER_MODE = os.getenv('SCHEDULER_MODE', 'all').lower()
+    ENABLE_LEAD_COLLECTION = os.getenv('ENABLE_LEAD_COLLECTION', 'true').lower() == 'true'
+    ENABLE_MARKETING_JOBS = os.getenv('ENABLE_MARKETING_JOBS', 'true').lower() == 'true'
+    ENABLE_REPORTING_JOBS = os.getenv('ENABLE_REPORTING_JOBS', 'true').lower() == 'true'
     
     # Schedule Configuration
     SCHEDULE_CONFIG = {
