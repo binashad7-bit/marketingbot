@@ -35,6 +35,10 @@ PORT = os.getenv('PORT', 5000)
 
 def init_scheduler():
     """স্বয়ংক্রিয় টাস্ক সময়সূচী সেটআপ করা"""
+    if scheduler.running:
+        logger.info("শিডিউলার ইতিমধ্যে চালু আছে")
+        return
+
     logger.info("শিডিউলার সেটআপ করছি...")
     
     # ======== রাত্রিকালীন লিড সংগ্রহ ========

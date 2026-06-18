@@ -123,7 +123,7 @@ def init_db(app):
     """ডাটাবেস ইনিশিয়ালাইজ করা"""
     with app.app_context():
         db.create_all()
-        print("✓ ডাটাবেস টেবিল তৈরি হয়েছে")
+        print("Database tables ensured")
 
 
 def add_lead(school_name, phone, email, district, type, source, **kwargs):
