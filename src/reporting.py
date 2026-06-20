@@ -5,7 +5,7 @@ from datetime import datetime
 from loguru import logger
 from sqlalchemy import or_
 
-from src.database import Lead, get_stats
+from src.database import Lead, db, get_stats, refresh_lead_contact_fields
 from config import Config
 import json
 import os
@@ -176,14 +176,32 @@ class ReportGenerator:
             ).order_by(Lead.score.desc(), Lead.updated_at.desc()).all()
             worksheet = self._get_or_create_worksheet('Leads')
             rows = [self._lead_sheet_headers()]
+            seen_contact_keys = set()
+            skipped_no_contact = 0
+            skipped_duplicates = 0
 
             for lead in leads:
+                refresh_lead_contact_fields(lead)
+                if lead.qualification_status != 'qualified':
+                    skipped_no_contact += 1
+                    continue
+
+                contact_key = lead.phone_e164 or lead.email or lead.duplicate_key or lead.canonical_key
+                if contact_key in seen_contact_keys:
+                    skipped_duplicates += 1
+                    continue
+                seen_contact_keys.add(contact_key)
+
                 rows.append([
                     lead.id,
                     lead.school_name or '',
                     lead.type or '',
                     lead.district or '',
                     lead.phone or '',
+                    lead.phone_e164 or '',
+                    lead.whatsapp_url or '',
+                    lead.phone_valid,
+                    lead.phone_type or '',
                     lead.email or '',
                     lead.website or '',
                     lead.address or '',
@@ -193,16 +211,21 @@ class ReportGenerator:
                     lead.active_status or '',
                     lead.rating or '',
                     lead.user_ratings_total or '',
+                    lead.qualification_status or '',
+                    lead.contact_quality or '',
+                    lead.duplicate_key or '',
                     lead.score or 0,
                     lead.segment or '',
                     lead.status or '',
                     self._format_dt(lead.last_checked_at),
                     self._format_dt(lead.last_enriched_at),
                     self._format_dt(lead.email_checked_at),
+                    self._format_dt(lead.last_verified_at),
                     self._format_dt(lead.created_at),
                     self._format_dt(lead.updated_at)
                 ])
 
+            db.session.commit()
             worksheet.clear()
             if rows:
                 worksheet.update('A1', rows, value_input_option='USER_ENTERED')
@@ -211,8 +234,17 @@ class ReportGenerator:
                 except Exception as e:
                     logger.debug(f"Could not freeze lead sheet header: {e}")
 
-            logger.info(f"Google Sheets lead sync complete: {len(leads)} leads")
-            return {'synced': len(leads), 'worksheet': worksheet.title}
+            synced = len(rows) - 1
+            logger.info(
+                f"Google Sheets lead sync complete: synced={synced}, "
+                f"skipped_no_contact={skipped_no_contact}, skipped_duplicates={skipped_duplicates}"
+            )
+            return {
+                'synced': synced,
+                'worksheet': worksheet.title,
+                'skipped_no_contact': skipped_no_contact,
+                'skipped_duplicates': skipped_duplicates
+            }
         except Exception as e:
             logger.error(f"Google Sheets lead sync error: {e}")
             return {'synced': 0, 'worksheet': None, 'error': str(e)}
@@ -221,15 +253,17 @@ class ReportGenerator:
         try:
             return self.spreadsheet.worksheet(title)
         except gspread.WorksheetNotFound:
-            return self.spreadsheet.add_worksheet(title=title, rows=1000, cols=24)
+            return self.spreadsheet.add_worksheet(title=title, rows=1000, cols=32)
 
     def _lead_sheet_headers(self):
         return [
-            'id', 'school_name', 'type', 'district', 'phone', 'email',
-            'website', 'address', 'source', 'place_id', 'business_status',
-            'active_status', 'rating', 'user_ratings_total', 'score', 'segment',
-            'status', 'last_checked_at', 'last_enriched_at', 'email_checked_at',
-            'created_at', 'updated_at'
+            'id', 'school_name', 'type', 'district', 'phone',
+            'phone_e164', 'whatsapp_url', 'phone_valid', 'phone_type',
+            'email', 'website', 'address', 'source', 'place_id', 'business_status',
+            'active_status', 'rating', 'user_ratings_total', 'qualification_status',
+            'contact_quality', 'duplicate_key', 'score', 'segment', 'status',
+            'last_checked_at', 'last_enriched_at', 'email_checked_at',
+            'last_verified_at', 'created_at', 'updated_at'
         ]
 
     def _format_dt(self, value):

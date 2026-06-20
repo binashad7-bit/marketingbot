@@ -257,8 +257,11 @@ def lead_collection_status():
             'unknown_active_status_leads': Lead.query.filter((Lead.active_status == None) | (Lead.active_status == 'unknown')).count(),
             'leads_with_place_id': Lead.query.filter(Lead.place_id != None, Lead.place_id != '').count(),
             'leads_with_phone': Lead.query.filter(Lead.phone != None, Lead.phone != '').count(),
+            'leads_with_valid_whatsapp_phone': Lead.query.filter(Lead.phone_valid == True).count(),
             'leads_with_email': Lead.query.filter(Lead.email != None, Lead.email != '').count(),
             'leads_with_website': Lead.query.filter(Lead.website != None, Lead.website != '').count(),
+            'qualified_leads': Lead.query.filter(Lead.qualification_status == 'qualified').count(),
+            'unusable_no_contact_leads': Lead.query.filter(Lead.qualification_status == 'unusable').count(),
             'leads_last_24h': Lead.query.filter(Lead.created_at >= last_24h).count(),
             'leads_last_7d': Lead.query.filter(Lead.created_at >= last_7d).count(),
             'last_lead_at': latest_lead.created_at.isoformat() if latest_lead else None,
@@ -287,8 +290,11 @@ def lead_collection_workflow():
             'total_leads': Lead.query.count(),
             'active_leads': Lead.query.filter(Lead.active_status == 'active').count(),
             'leads_with_phone': Lead.query.filter(Lead.phone != None, Lead.phone != '').count(),
+            'leads_with_valid_whatsapp_phone': Lead.query.filter(Lead.phone_valid == True).count(),
             'leads_with_email': Lead.query.filter(Lead.email != None, Lead.email != '').count(),
             'leads_with_website': Lead.query.filter(Lead.website != None, Lead.website != '').count(),
+            'qualified_leads': Lead.query.filter(Lead.qualification_status == 'qualified').count(),
+            'unusable_no_contact_leads': Lead.query.filter(Lead.qualification_status == 'unusable').count(),
             'logs': get_recent_workflow_logs(limit=limit),
             'timestamp': datetime.now().isoformat()
         }), 200
@@ -345,7 +351,8 @@ def lead_collection_dashboard():
     <div class="metrics">
       <div class="metric">Total leads<strong id="total">0</strong></div>
       <div class="metric">Active leads<strong id="active">0</strong></div>
-      <div class="metric">Phones<strong id="phones">0</strong></div>
+      <div class="metric">Qualified<strong id="qualified">0</strong></div>
+      <div class="metric">WhatsApp-ready phones<strong id="phones">0</strong></div>
       <div class="metric">Websites<strong id="websites">0</strong></div>
       <div class="metric">Emails<strong id="emails">0</strong></div>
     </div>
@@ -364,7 +371,8 @@ def lead_collection_dashboard():
       document.getElementById('updated').textContent = `Updated: ${new Date().toLocaleString()}`;
       document.getElementById('total').textContent = data.total_leads;
       document.getElementById('active').textContent = data.active_leads;
-      document.getElementById('phones').textContent = data.leads_with_phone;
+      document.getElementById('qualified').textContent = data.qualified_leads;
+      document.getElementById('phones').textContent = data.leads_with_valid_whatsapp_phone;
       document.getElementById('websites').textContent = data.leads_with_website;
       document.getElementById('emails').textContent = data.leads_with_email;
       const logs = data.logs || [];

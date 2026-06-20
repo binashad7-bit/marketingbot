@@ -10,7 +10,7 @@ from loguru import logger
 from sqlalchemy import or_
 
 from config import Config
-from src.database import Lead, add_lead, db
+from src.database import Lead, add_lead, db, normalize_bd_phone, refresh_lead_contact_fields
 
 logger.add("logs/lead_collection.log", rotation="500 MB")
 
@@ -155,6 +155,8 @@ class LeadCollector:
             details.get('formatted_phone_number') or details.get('international_phone_number')
         )
         website = self._clean_website_url(details.get('website') or '')
+        if not phone and website:
+            phone = self._find_phone_from_website(website)
         rating = details.get('rating') or place.get('rating')
         user_ratings_total = details.get('user_ratings_total') or place.get('user_ratings_total')
 
@@ -286,12 +288,17 @@ class LeadCollector:
         business_status = details.get('business_status')
         active_status = self._active_status_from_business_status(business_status)
 
+        phone = self._clean_phone(details.get('formatted_phone_number') or details.get('international_phone_number'))
+        website = self._clean_website_url(details.get('website') or '')
+        if not phone and website:
+            phone = self._find_phone_from_website(website)
+
         updates = {
             'place_id': details.get('place_id'),
             'business_status': business_status,
             'active_status': active_status,
-            'phone': self._clean_phone(details.get('formatted_phone_number') or details.get('international_phone_number')),
-            'website': self._clean_website_url(details.get('website') or ''),
+            'phone': phone,
+            'website': website,
             'address': details.get('formatted_address') or '',
             'rating': details.get('rating'),
             'user_ratings_total': details.get('user_ratings_total'),
@@ -312,6 +319,8 @@ class LeadCollector:
         if self._looks_closed(lead.school_name) or business_status in self.CLOSED_STATUSES:
             lead.active_status = 'closed'
             changed = True
+
+        refresh_lead_contact_fields(lead)
 
         return changed
 
@@ -406,6 +415,37 @@ class LeadCollector:
 
         return None
 
+    def _find_phone_from_website(self, website):
+        candidates = [website.rstrip('/')]
+        for path in ('contact', 'contact-us', 'about', 'about-us', 'admission'):
+            candidates.append(f"{website.rstrip('/')}/{path}")
+
+        for url in candidates:
+            try:
+                response = requests.get(
+                    url,
+                    timeout=3,
+                    headers={'User-Agent': 'Mozilla/5.0 PathshalaPro lead phone enrichment'}
+                )
+                if response.status_code >= 400:
+                    continue
+
+                soup = BeautifulSoup(response.text, 'html.parser')
+                values = []
+                for link in soup.select('a[href^="tel:"], a[href^="https://wa.me/"], a[href*="whatsapp"]'):
+                    values.append(link.get('href', ''))
+                    values.append(link.get_text(' ', strip=True))
+                values.append(soup.get_text(' ', strip=True))
+
+                for value in values:
+                    phone_info = normalize_bd_phone(value)
+                    if phone_info['phone_valid']:
+                        return phone_info['phone']
+            except Exception as e:
+                logger.debug(f"Website phone lookup failed for {url}: {e}")
+
+        return None
+
     def enrich_missing_emails(self, limit=50, commit_every=10):
         """Enrich a small quota-aware batch of active leads with websites."""
         cutoff = datetime.utcnow() - timedelta(days=14)
@@ -429,6 +469,7 @@ class LeadCollector:
             checked += 1
             if email:
                 lead.email = email
+                refresh_lead_contact_fields(lead)
                 updated += 1
             if checked % commit_every == 0:
                 db.session.commit()
@@ -445,17 +486,26 @@ class LeadCollector:
         leads = Lead.query.order_by(Lead.updated_at.desc()).all()
         seen_place_ids = set()
         seen_phones = set()
+        seen_emails = set()
+        seen_duplicate_keys = set()
         seen_keys = set()
         duplicates_removed = 0
 
         for lead in leads:
+            refresh_lead_contact_fields(lead)
             duplicate = False
             if lead.place_id:
                 duplicate = lead.place_id in seen_place_ids
                 seen_place_ids.add(lead.place_id)
-            if not duplicate and lead.phone:
-                duplicate = lead.phone in seen_phones
-                seen_phones.add(lead.phone)
+            if not duplicate and lead.phone_e164:
+                duplicate = lead.phone_e164 in seen_phones
+                seen_phones.add(lead.phone_e164)
+            if not duplicate and lead.email:
+                duplicate = lead.email in seen_emails
+                seen_emails.add(lead.email)
+            if not duplicate and lead.duplicate_key:
+                duplicate = lead.duplicate_key in seen_duplicate_keys
+                seen_duplicate_keys.add(lead.duplicate_key)
             if not duplicate and lead.canonical_key:
                 duplicate = lead.canonical_key in seen_keys
                 seen_keys.add(lead.canonical_key)
@@ -480,9 +530,16 @@ class LeadCollector:
             score = 0
             if lead.active_status == 'active':
                 score += 2
+            refresh_lead_contact_fields(lead)
+
+            if lead.qualification_status == 'unusable':
+                lead.segment = 'Unusable'
+                lead.score = 0
+                continue
+
             if lead.email:
                 score += 3
-            if lead.phone:
+            if lead.phone_valid:
                 score += 2
             if lead.website:
                 score += 2
@@ -524,12 +581,7 @@ class LeadCollector:
         return url
 
     def _clean_phone(self, phone):
-        if not phone:
-            return None
-        phone = str(phone).strip().replace(' ', '').replace('-', '')
-        if phone.startswith('+880'):
-            phone = '0' + phone[4:]
-        return phone[:20]
+        return normalize_bd_phone(phone)['phone']
 
     def _looks_closed(self, name):
         return bool(name and self.CLOSED_NAME_PATTERN.search(name))

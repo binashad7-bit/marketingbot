@@ -3,7 +3,7 @@ from datetime import datetime
 from loguru import logger
 from config import Config
 from src.database import (
-    Lead, update_lead_status, log_whatsapp_event, db
+    Lead, update_lead_status, log_whatsapp_event, db, normalize_bd_phone
 )
 import csv
 import os
@@ -33,10 +33,10 @@ class WhatsAppCampaign:
                 return True, sid
 
             # ফোন নম্বর ফরম্যাট করা (Bangladesh format)
-            if phone_number.startswith('0'):
-                phone_number = '+880' + phone_number[1:]
-            elif not phone_number.startswith('+88'):
-                phone_number = '+880' + phone_number
+            phone_info = normalize_bd_phone(phone_number)
+            if not phone_info['phone_valid']:
+                raise ValueError(f"Invalid WhatsApp-ready Bangladesh mobile number: {phone_number}")
+            phone_number = phone_info['phone_e164']
             
             message = self.client.messages.create(
                 from_=f'whatsapp:{self.whatsapp_from}',
@@ -113,7 +113,7 @@ class WhatsAppCampaign:
             engaged_leads = Lead.query.filter(
                 Lead.email_opened == True,
                 Lead.whatsapp_sent == False,
-                Lead.phone != None
+                Lead.phone_valid == True
             ).all()
             
             logger.info(f"এনগেজড লিড: {len(engaged_leads)}")
@@ -124,7 +124,7 @@ class WhatsAppCampaign:
                 message_text = self._create_message(lead)
                 
                 success, sid = self.send_message(
-                    lead.phone,
+                    lead.phone_e164 or lead.phone,
                     message_text,
                     lead.id
                 )
