@@ -268,8 +268,8 @@ class LeadCollector:
                 if find_email and lead.website and not lead.email:
                     email = self.find_emails(lead.website, lead.school_name)
                     lead.email_checked_at = datetime.utcnow()
-                    if email:
-                        lead.email = email
+                    if email and not self._email_used_by_other_lead(email, lead.id):
+                        lead.email = email.lower()
                         changed = True
 
                 if changed:
@@ -580,6 +580,14 @@ class LeadCollector:
 
         return sorted(set(clean_emails), key=lambda email: (-score(email), email))[0]
 
+    def _email_used_by_other_lead(self, email, lead_id):
+        if not email:
+            return False
+        return db.session.query(Lead.id).filter(
+            Lead.id != lead_id,
+            db.func.lower(Lead.email) == email.lower()
+        ).first() is not None
+
     def _find_phone_from_website(self, website):
         candidates = [website.rstrip('/')]
         for path in ('contact', 'contact-us', 'about', 'about-us', 'admission'):
@@ -635,8 +643,8 @@ class LeadCollector:
                 hunter_searches += 1
             lead.email_checked_at = datetime.utcnow()
             checked += 1
-            if email:
-                lead.email = email
+            if email and not self._email_used_by_other_lead(email, lead.id):
+                lead.email = email.lower()
                 refresh_lead_contact_fields(lead)
                 updated += 1
             if checked % commit_every == 0:
