@@ -370,7 +370,7 @@ class LeadCollector:
             try:
                 response = requests.get(
                     url,
-                    timeout=6,
+                    timeout=3,
                     headers={'User-Agent': 'Mozilla/5.0 PathshalaPro lead enrichment'}
                 )
                 if response.status_code >= 400:
