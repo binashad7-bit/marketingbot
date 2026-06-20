@@ -94,15 +94,14 @@ class LeadCollector:
         logger.info(f"Collecting Google Maps leads: {search_query}")
         while seen_results < results_per_query:
             if page_token:
-                time.sleep(2.2)
                 params = {'pagetoken': page_token, 'key': self.google_maps_api_key}
 
-            data = self._get_json(url, params)
+            data = self._get_google_places_page(url, params, bool(page_token))
             status = data.get('status')
             if status == 'ZERO_RESULTS':
                 break
             if status not in ('OK', None):
-                logger.warning(f"Google Places status={status} query={search_query} error={data.get('error_message')}")
+                logger.info(f"Google Places status={status} query={search_query} error={data.get('error_message')}")
                 break
 
             results = data.get('results', [])
@@ -123,6 +122,18 @@ class LeadCollector:
                 break
 
         return upserts
+
+    def _get_google_places_page(self, url, params, is_page_token_request=False):
+        if not is_page_token_request:
+            return self._get_json(url, params)
+
+        for attempt in range(4):
+            time.sleep(2.5 + attempt)
+            data = self._get_json(url, params)
+            if data.get('status') != 'INVALID_REQUEST':
+                return data
+            logger.debug(f"Google Places page token not ready yet; retry={attempt + 1}")
+        return data
 
     def _process_google_place(self, place, district, keyword):
         place_id = place.get('place_id')
@@ -508,7 +519,7 @@ class LeadCollector:
         if not parsed.scheme or not parsed.netloc:
             return ''
         if len(url) > 255:
-            logger.warning(f"Skipping overlong website URL for storage: {url[:120]}...")
+            logger.debug(f"Skipping overlong website URL for storage: {url[:120]}...")
             return ''
         return url
 
