@@ -90,6 +90,7 @@ class Config:
     DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     PORT = int(os.getenv('PORT', 5000))
+    ADMIN_API_TOKEN = os.getenv('ADMIN_API_TOKEN')
 
     # Scheduler Settings
     SCHEDULER_TIMEZONE = os.getenv('SCHEDULER_TIMEZONE', 'UTC')
@@ -108,6 +109,9 @@ class Config:
     CONTACT_ENRICH_LIMIT = int(os.getenv('CONTACT_ENRICH_LIMIT', 500))
     EMAIL_ENRICH_LIMIT = int(os.getenv('EMAIL_ENRICH_LIMIT', 25))
     HUNTER_SEARCHES_PER_RUN = int(os.getenv('HUNTER_SEARCHES_PER_RUN', 10))
+    GOOGLE_PLACES_DAILY_CALL_LIMIT = int(os.getenv('GOOGLE_PLACES_DAILY_CALL_LIMIT', 6000))
+    HUNTER_DAILY_CALL_LIMIT = int(os.getenv('HUNTER_DAILY_CALL_LIMIT', 50))
+    SEARCH_TASK_RESET_DAYS = int(os.getenv('SEARCH_TASK_RESET_DAYS', 14))
     
     # Schedule Configuration
     SCHEDULE_CONFIG = {

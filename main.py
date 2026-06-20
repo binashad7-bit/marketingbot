@@ -5,9 +5,19 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from loguru import logger
 import atexit
 from datetime import datetime, timedelta
+from functools import wraps
 
 from config import Config, get_config
-from src.database import Lead, db, init_db, get_stats, get_recent_workflow_logs, log_workflow_event
+from src.database import (
+    Lead,
+    SearchTask,
+    db,
+    get_api_usage_count,
+    get_recent_workflow_logs,
+    get_stats,
+    init_db,
+    log_workflow_event,
+)
 from src.lead_collection import lead_collector
 from src.email_campaign import email_campaign
 from src.whatsapp_campaign import whatsapp_campaign
@@ -39,6 +49,36 @@ LEAD_JOB_IDS = {
     'clean_leads',
     'sync_leads_to_sheets'
 }
+
+
+def _request_admin_token():
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.lower().startswith('bearer '):
+        return auth_header.split(' ', 1)[1].strip()
+    return request.headers.get('X-Admin-Token') or request.args.get('token')
+
+
+def require_admin(func):
+    """Protect operational endpoints that can spend credits or send messages."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not Config.ADMIN_API_TOKEN:
+            if Config.ENVIRONMENT == 'production':
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Admin API token is not configured'
+                }), 503
+            return func(*args, **kwargs)
+
+        if _request_admin_token() != Config.ADMIN_API_TOKEN:
+            return jsonify({
+                'status': 'error',
+                'message': 'Unauthorized'
+            }), 401
+
+        return func(*args, **kwargs)
+
+    return wrapper
 
 
 def run_scheduled_job(job_id, func, *args, **kwargs):
@@ -251,6 +291,22 @@ def lead_collection_status():
             'scheduler': 'running' if scheduler.running else 'stopped',
             'mode': Config.SCHEDULER_MODE,
             'timezone': Config.SCHEDULER_TIMEZONE,
+            'quota_usage_last_24h': {
+                'google_places': {
+                    'used': get_api_usage_count('google_places', hours=24),
+                    'limit': Config.GOOGLE_PLACES_DAILY_CALL_LIMIT
+                },
+                'hunter': {
+                    'used': get_api_usage_count('hunter', hours=24),
+                    'limit': Config.HUNTER_DAILY_CALL_LIMIT
+                }
+            },
+            'search_coverage': {
+                'total_tasks': SearchTask.query.count(),
+                'active_tasks': SearchTask.query.filter(SearchTask.status == 'active').count(),
+                'exhausted_tasks': SearchTask.query.filter(SearchTask.status == 'exhausted').count(),
+                'never_run_tasks': SearchTask.query.filter(SearchTask.last_run_at == None).count()
+            },
             'total_leads': Lead.query.count(),
             'active_leads': Lead.query.filter(Lead.active_status == 'active').count(),
             'closed_or_inactive_leads': Lead.query.filter(Lead.active_status == 'closed').count(),
@@ -404,6 +460,7 @@ def lead_collection_dashboard():
 
 
 @app.route('/trigger/lead-collection', methods=['POST'])
+@require_admin
 def trigger_lead_collection():
     """ম্যানুয়ালি লিড সংগ্রহ ট্রিগার করা"""
     try:
@@ -422,6 +479,7 @@ def trigger_lead_collection():
 
 
 @app.route('/trigger/sync-leads-to-sheets', methods=['POST'])
+@require_admin
 def trigger_sync_leads_to_sheets():
     """Manually sync collected leads to the Leads worksheet."""
     try:
@@ -440,6 +498,7 @@ def trigger_sync_leads_to_sheets():
 
 
 @app.route('/trigger/enrich-contact-info', methods=['POST'])
+@require_admin
 def trigger_enrich_contact_info():
     """Manually enrich existing leads with missing phone, website, and email."""
     try:
@@ -462,6 +521,7 @@ def trigger_enrich_contact_info():
 
 
 @app.route('/trigger/email-campaign', methods=['POST'])
+@require_admin
 def trigger_email_campaign():
     """ম্যানুয়ালি ইমেইল ক্যাম্পেইন ট্রিগার করা"""
     try:
@@ -480,6 +540,7 @@ def trigger_email_campaign():
 
 
 @app.route('/trigger/whatsapp-campaign', methods=['POST'])
+@require_admin
 def trigger_whatsapp_campaign():
     """ম্যানুয়ালি হোয়াটসঅ্যাপ ক্যাম্পেইন ট্রিগার করা"""
     try:
@@ -498,6 +559,7 @@ def trigger_whatsapp_campaign():
 
 
 @app.route('/trigger/facebook-posting', methods=['POST'])
+@require_admin
 def trigger_facebook_posting():
     """ম্যানুয়ালি ফেসবুক পোস্টিং ট্রিগার করা"""
     try:
@@ -516,6 +578,7 @@ def trigger_facebook_posting():
 
 
 @app.route('/trigger/tracking', methods=['POST'])
+@require_admin
 def trigger_tracking():
     """ম্যানুয়ালি ট্র্যাকিং ট্রিগার করা"""
     try:
@@ -534,6 +597,7 @@ def trigger_tracking():
 
 
 @app.route('/trigger/report', methods=['POST'])
+@require_admin
 def trigger_report():
     """ম্যানুয়ালি রিপোর্ট জেনারেশন ট্রিগার করা"""
     try:
@@ -610,6 +674,7 @@ def twilio_webhook():
 
 
 @app.route('/scheduler/jobs', methods=['GET'])
+@require_admin
 def list_jobs():
     """সব শিডিউলড জবস দেখা"""
     try:

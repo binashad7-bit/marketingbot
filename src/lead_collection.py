@@ -10,7 +10,18 @@ from loguru import logger
 from sqlalchemy import or_
 
 from config import Config
-from src.database import Lead, add_lead, db, normalize_bd_phone, refresh_lead_contact_fields
+from src.database import (
+    Lead,
+    add_lead,
+    can_use_api,
+    db,
+    ensure_search_tasks,
+    get_next_search_tasks,
+    mark_search_task_result,
+    normalize_bd_phone,
+    record_api_usage,
+    refresh_lead_contact_fields,
+)
 
 logger.add("logs/lead_collection.log", rotation="500 MB")
 
@@ -69,16 +80,26 @@ class LeadCollector:
         max_queries = max_queries or Config.LEAD_COLLECTION_QUERIES_PER_RUN
         results_per_query = results_per_query or Config.LEAD_COLLECTION_RESULTS_PER_QUERY
 
-        query_plan = [(district, keyword) for district in districts for keyword in keywords]
-        random.shuffle(query_plan)
-        query_plan = query_plan[:max_queries]
+        ensure_search_tasks(districts, keywords)
+        tasks = get_next_search_tasks(max_queries, reset_days=Config.SEARCH_TASK_RESET_DAYS)
+        if tasks:
+            query_plan = [(task.district, task.keyword, task) for task in tasks]
+        else:
+            query_plan = [(district, keyword, None) for district in districts for keyword in keywords]
+            random.shuffle(query_plan)
+            query_plan = query_plan[:max_queries]
 
         total_upserts = 0
-        for district, keyword in query_plan:
+        for district, keyword, task in query_plan:
             try:
-                total_upserts += self._collect_google_maps_query(keyword, district, results_per_query)
+                upserts = self._collect_google_maps_query(keyword, district, results_per_query)
+                total_upserts += upserts
+                if task:
+                    mark_search_task_result(task, upserts)
             except Exception as e:
                 logger.error(f"Google Maps query failed for {keyword} in {district}: {e}")
+                if task:
+                    mark_search_task_result(task, 0)
 
         logger.info(f"Google Maps collection complete: {total_upserts} leads upserted")
         return total_upserts
@@ -195,7 +216,16 @@ class LeadCollector:
         return data.get('result', {})
 
     def _get_json(self, url, params):
+        if 'maps.googleapis.com' in url and not can_use_api('google_places', Config.GOOGLE_PLACES_DAILY_CALL_LIMIT):
+            raise RuntimeError("Google Places daily API call limit reached")
         response = requests.get(url, params=params, timeout=15)
+        if 'maps.googleapis.com' in url:
+            record_api_usage(
+                'google_places',
+                endpoint=urlparse(url).path.rsplit('/', 1)[-1],
+                status_code=response.status_code,
+                success=response.status_code < 400
+            )
         response.raise_for_status()
         return response.json()
 
@@ -357,8 +387,17 @@ class LeadCollector:
 
     def _find_email_with_hunter(self, domain_name):
         url = "https://api.hunter.io/v2/domain-search"
+        if not can_use_api('hunter', Config.HUNTER_DAILY_CALL_LIMIT):
+            logger.info(f"Hunter daily API call limit reached; skipping {domain_name}")
+            return None
         params = {'domain': domain_name, 'limit': 10, 'api_key': self.hunter_api_key}
         response = requests.get(url, params=params, timeout=10)
+        record_api_usage(
+            'hunter',
+            endpoint='domain-search',
+            status_code=response.status_code,
+            success=response.status_code < 400
+        )
         if response.status_code in (401, 403, 429):
             logger.warning(f"Hunter lookup skipped for {domain_name}: status={response.status_code}")
             return None

@@ -1,5 +1,5 @@
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 import re
@@ -149,6 +149,36 @@ class WorkflowLog(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
 
+class ApiUsageLog(db.Model):
+    """Daily API usage ledger for quota/cost guardrails."""
+    __tablename__ = 'api_usage_logs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    provider = db.Column(db.String(50), index=True)
+    endpoint = db.Column(db.String(100), nullable=True)
+    status_code = db.Column(db.Integer, nullable=True)
+    success = db.Column(db.Boolean, default=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+
+class SearchTask(db.Model):
+    """Persistent coverage tracker for district + keyword searches."""
+    __tablename__ = 'search_tasks'
+
+    id = db.Column(db.Integer, primary_key=True)
+    district = db.Column(db.String(100), index=True)
+    keyword = db.Column(db.String(100), index=True)
+    status = db.Column(db.String(30), default='active', index=True)
+    priority = db.Column(db.Integer, default=0)
+    total_runs = db.Column(db.Integer, default=0)
+    total_upserts = db.Column(db.Integer, default=0)
+    last_result_count = db.Column(db.Integer, default=0)
+    consecutive_empty = db.Column(db.Integer, default=0)
+    last_run_at = db.Column(db.DateTime, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ডাটাবেস ফাংশনস
 
 def init_db(app):
@@ -196,7 +226,7 @@ def ensure_schema():
             statement = f'ALTER TABLE leads ADD COLUMN {column_name} {column_type}'
         db.session.execute(text(statement))
 
-    for statement in (
+    index_statements = [
         'CREATE INDEX IF NOT EXISTS ix_leads_place_id ON leads (place_id)',
         'CREATE INDEX IF NOT EXISTS ix_leads_phone_e164 ON leads (phone_e164)',
         'CREATE INDEX IF NOT EXISTS ix_leads_phone_valid ON leads (phone_valid)',
@@ -204,8 +234,19 @@ def ensure_schema():
         'CREATE INDEX IF NOT EXISTS ix_leads_canonical_key ON leads (canonical_key)',
         'CREATE INDEX IF NOT EXISTS ix_leads_qualification_status ON leads (qualification_status)',
         'CREATE INDEX IF NOT EXISTS ix_leads_duplicate_key ON leads (duplicate_key)',
-    ):
-        db.session.execute(text(statement))
+        'CREATE UNIQUE INDEX IF NOT EXISTS ux_search_tasks_district_keyword ON search_tasks (district, keyword)',
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_place_id_not_null ON leads (place_id) WHERE place_id IS NOT NULL AND place_id <> ''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_phone_e164_not_null ON leads (phone_e164) WHERE phone_e164 IS NOT NULL AND phone_e164 <> ''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_email_not_null ON leads (email) WHERE email IS NOT NULL AND email <> ''",
+    ]
+
+    for statement in index_statements:
+        try:
+            db.session.execute(text(statement))
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Schema index skipped: {e}")
 
     db.session.commit()
 
@@ -484,6 +525,93 @@ def get_recent_workflow_logs(limit=100):
         }
         for log in logs
     ]
+
+
+def record_api_usage(provider, endpoint=None, status_code=None, success=True):
+    try:
+        log = ApiUsageLog(
+            provider=provider,
+            endpoint=endpoint,
+            status_code=status_code,
+            success=success
+        )
+        db.session.add(log)
+        db.session.commit()
+        return log
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error logging API usage: {e}")
+        return None
+
+
+def get_api_usage_count(provider, hours=24):
+    since = datetime.utcnow() - timedelta(hours=hours)
+    return ApiUsageLog.query.filter(
+        ApiUsageLog.provider == provider,
+        ApiUsageLog.created_at >= since
+    ).count()
+
+
+def can_use_api(provider, daily_limit):
+    if not daily_limit:
+        return True
+    return get_api_usage_count(provider, hours=24) < daily_limit
+
+
+def ensure_search_tasks(districts, keywords):
+    created = 0
+    for district in districts:
+        for keyword in keywords:
+            exists = SearchTask.query.filter_by(district=district, keyword=keyword).first()
+            if exists:
+                continue
+            db.session.add(SearchTask(district=district, keyword=keyword))
+            created += 1
+    if created:
+        db.session.commit()
+    return created
+
+
+def get_next_search_tasks(limit, reset_days=14):
+    stale_before = datetime.utcnow() - timedelta(days=reset_days)
+    tasks = SearchTask.query.filter(
+        SearchTask.status == 'active'
+    ).order_by(
+        SearchTask.last_run_at.asc().nullsfirst(),
+        SearchTask.priority.desc(),
+        SearchTask.consecutive_empty.asc()
+    ).limit(limit).all()
+
+    if len(tasks) < limit:
+        stale_tasks = SearchTask.query.filter(
+            SearchTask.status == 'exhausted',
+            SearchTask.last_run_at < stale_before
+        ).limit(limit - len(tasks)).all()
+        for task in stale_tasks:
+            task.status = 'active'
+            task.consecutive_empty = 0
+        if stale_tasks:
+            db.session.commit()
+        tasks.extend(stale_tasks)
+
+    return tasks
+
+
+def mark_search_task_result(task, upserts):
+    task.total_runs = (task.total_runs or 0) + 1
+    task.total_upserts = (task.total_upserts or 0) + upserts
+    task.last_result_count = upserts
+    task.last_run_at = datetime.utcnow()
+    task.updated_at = datetime.utcnow()
+    if upserts:
+        task.consecutive_empty = 0
+        task.status = 'active'
+    else:
+        task.consecutive_empty = (task.consecutive_empty or 0) + 1
+        if task.consecutive_empty >= 3:
+            task.status = 'exhausted'
+    db.session.commit()
+    return task
 
 
 def get_leads_by_segment(segment):
