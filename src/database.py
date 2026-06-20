@@ -1,5 +1,6 @@
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
+import json
 import os
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
@@ -126,6 +127,19 @@ class FollowUp(db.Model):
     lead = db.relationship('Lead', backref='followups')
 
 
+class WorkflowLog(db.Model):
+    """Operational log for lead-only automation jobs."""
+    __tablename__ = 'workflow_logs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_id = db.Column(db.String(100), index=True)
+    level = db.Column(db.String(20), default='info', index=True)
+    status = db.Column(db.String(30), index=True)
+    message = db.Column(db.String(500))
+    payload = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+
 # ডাটাবেস ফাংশনস
 
 def init_db(app):
@@ -244,6 +258,41 @@ def _build_canonical_key(school_name, district, address=None):
     values = [school_name or '', district or '', address or '']
     normalized = '|'.join(' '.join(value.lower().split()) for value in values if value)
     return normalized[:255] if normalized else None
+
+
+def log_workflow_event(job_id, status, message, level='info', payload=None):
+    """Persist compact workflow events for the monitoring dashboard."""
+    try:
+        log = WorkflowLog(
+            job_id=job_id,
+            level=level,
+            status=status,
+            message=message[:500] if message else '',
+            payload=json.dumps(payload, default=str) if payload is not None else None
+        )
+        db.session.add(log)
+        db.session.commit()
+        return log
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error logging workflow event: {e}")
+        return None
+
+
+def get_recent_workflow_logs(limit=100):
+    logs = WorkflowLog.query.order_by(WorkflowLog.created_at.desc()).limit(limit).all()
+    return [
+        {
+            'id': log.id,
+            'job_id': log.job_id,
+            'level': log.level,
+            'status': log.status,
+            'message': log.message,
+            'payload': json.loads(log.payload) if log.payload else None,
+            'created_at': log.created_at.isoformat() if log.created_at else None
+        }
+        for log in logs
+    ]
 
 
 def get_leads_by_segment(segment):

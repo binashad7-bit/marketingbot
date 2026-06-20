@@ -7,7 +7,7 @@ import atexit
 from datetime import datetime, timedelta
 
 from config import Config, get_config
-from src.database import Lead, db, init_db, get_stats
+from src.database import Lead, db, init_db, get_stats, get_recent_workflow_logs, log_workflow_event
 from src.lead_collection import lead_collector
 from src.email_campaign import email_campaign
 from src.whatsapp_campaign import whatsapp_campaign
@@ -46,11 +46,15 @@ def run_scheduled_job(job_id, func, *args, **kwargs):
     try:
         logger.info(f"Scheduled job started: {job_id}")
         with app.app_context():
+            log_workflow_event(job_id, 'started', f'{job_id} started')
             result = func(*args, **kwargs)
+            log_workflow_event(job_id, 'success', f'{job_id} finished', payload=result)
         logger.info(f"Scheduled job finished: {job_id} result={result}")
         return result
     except Exception as e:
         logger.exception(f"Scheduled job failed: {job_id}: {e}")
+        with app.app_context():
+            log_workflow_event(job_id, 'failed', str(e), level='error')
         raise
 
 
@@ -176,6 +180,8 @@ def index():
         'endpoints': {
             'health': '/health',
             'lead_collection_status': '/lead-collection/status',
+            'lead_collection_workflow': '/lead-collection/workflow',
+            'lead_collection_dashboard': '/lead-collection/dashboard',
             'stats': '/stats',
             'scheduler_jobs': '/scheduler/jobs',
             'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
@@ -259,6 +265,7 @@ def lead_collection_status():
             'source_counts': sources,
             'district_counts': districts,
             'lead_jobs': lead_jobs,
+            'recent_workflow_logs': get_recent_workflow_logs(limit=20),
             'timestamp': datetime.now().isoformat()
         }), 200
     except Exception as e:
@@ -267,6 +274,125 @@ def lead_collection_status():
             'status': 'error',
             'message': str(e)
         }), 500
+
+
+@app.route('/lead-collection/workflow', methods=['GET'])
+def lead_collection_workflow():
+    """Clean workflow log feed for lead-generation monitoring."""
+    try:
+        limit = min(int(request.args.get('limit', 100)), 300)
+        return jsonify({
+            'status': 'success',
+            'scheduler': 'running' if scheduler.running else 'stopped',
+            'total_leads': Lead.query.count(),
+            'active_leads': Lead.query.filter(Lead.active_status == 'active').count(),
+            'leads_with_phone': Lead.query.filter(Lead.phone != None, Lead.phone != '').count(),
+            'leads_with_email': Lead.query.filter(Lead.email != None, Lead.email != '').count(),
+            'leads_with_website': Lead.query.filter(Lead.website != None, Lead.website != '').count(),
+            'logs': get_recent_workflow_logs(limit=limit),
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Lead workflow log error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/lead-collection/dashboard', methods=['GET'])
+def lead_collection_dashboard():
+    """Small auto-refreshing dashboard for non-technical workflow monitoring."""
+    html = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PathshalaPro Lead Monitor</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, Arial, sans-serif; }
+    body { margin: 0; background: #f4f7f6; color: #17211d; }
+    header { padding: 18px 24px; background: #173c33; color: white; display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
+    main { padding: 20px 24px 32px; max-width: 1200px; margin: 0 auto; }
+    .status { font-size: 14px; color: #c8efe3; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .metric { background: white; border: 1px solid #d8e1dd; border-radius: 8px; padding: 14px; }
+    .metric strong { display: block; font-size: 26px; margin-top: 6px; }
+    .section { background: white; border: 1px solid #d8e1dd; border-radius: 8px; overflow: hidden; }
+    .section h2 { margin: 0; padding: 14px 16px; font-size: 16px; border-bottom: 1px solid #d8e1dd; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #edf1ef; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+    th { background: #f8faf9; color: #4b5c55; font-weight: 700; }
+    .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .success { background: #dff5e7; color: #176a35; }
+    .started { background: #e3efff; color: #2257a3; }
+    .failed { background: #ffe3df; color: #a43122; }
+    .empty { padding: 18px; color: #63736d; }
+    @media (max-width: 640px) { header { align-items: flex-start; flex-direction: column; } main { padding: 14px; } th:nth-child(5), td:nth-child(5) { display: none; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>PathshalaPro Lead Monitor</h1>
+      <div class="status" id="status">Loading workflow...</div>
+    </div>
+    <div class="status" id="updated"></div>
+  </header>
+  <main>
+    <div class="metrics">
+      <div class="metric">Total leads<strong id="total">0</strong></div>
+      <div class="metric">Active leads<strong id="active">0</strong></div>
+      <div class="metric">Phones<strong id="phones">0</strong></div>
+      <div class="metric">Websites<strong id="websites">0</strong></div>
+      <div class="metric">Emails<strong id="emails">0</strong></div>
+    </div>
+    <div class="section">
+      <h2>Recent Workflow Events</h2>
+      <div id="logs"></div>
+    </div>
+  </main>
+  <script>
+    const fmt = (value) => value || '';
+    const payloadText = (payload) => payload ? JSON.stringify(payload) : '';
+    async function refresh() {
+      const response = await fetch('/lead-collection/workflow?limit=80', { cache: 'no-store' });
+      const data = await response.json();
+      document.getElementById('status').textContent = `Scheduler: ${data.scheduler}`;
+      document.getElementById('updated').textContent = `Updated: ${new Date().toLocaleString()}`;
+      document.getElementById('total').textContent = data.total_leads;
+      document.getElementById('active').textContent = data.active_leads;
+      document.getElementById('phones').textContent = data.leads_with_phone;
+      document.getElementById('websites').textContent = data.leads_with_website;
+      document.getElementById('emails').textContent = data.leads_with_email;
+      const logs = data.logs || [];
+      if (!logs.length) {
+        document.getElementById('logs').innerHTML = '<div class="empty">No workflow events have been recorded yet. New events will appear after the next scheduled job.</div>';
+        return;
+      }
+      const rows = logs.map((log) => `
+        <tr>
+          <td>${fmt(log.created_at)}</td>
+          <td>${fmt(log.job_id)}</td>
+          <td><span class="pill ${fmt(log.status)}">${fmt(log.status)}</span></td>
+          <td>${fmt(log.message)}</td>
+          <td>${payloadText(log.payload)}</td>
+        </tr>`).join('');
+      document.getElementById('logs').innerHTML = `
+        <table>
+          <thead><tr><th>Time</th><th>Job</th><th>Status</th><th>Message</th><th>Payload</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+    refresh();
+    setInterval(refresh, 15000);
+  </script>
+</body>
+</html>
+"""
+    return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 
 @app.route('/trigger/lead-collection', methods=['POST'])
@@ -533,6 +659,12 @@ def initialize_app():
         
         # শিডিউলার সেটআপ
         init_scheduler()
+        log_workflow_event(
+            'app',
+            'success',
+            'Application initialized and scheduler started',
+            payload={'mode': Config.SCHEDULER_MODE, 'timezone': Config.SCHEDULER_TIMEZONE}
+        )
         
         logger.info("✓ অ্যাপ সফলভাবে ইনিশিয়ালাইজ করা হয়েছে")
 
