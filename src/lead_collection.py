@@ -2,7 +2,8 @@ import random
 import re
 import time
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs, unquote, urlparse
+from html import unescape
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -370,7 +371,7 @@ class LeadCollector:
                 if hunter_email:
                     return hunter_email, True
 
-            website_email = self._find_email_from_website(domain)
+            website_email = self._find_email_from_website(domain, school_name)
             if website_email:
                 return website_email, False
 
@@ -417,42 +418,167 @@ class LeadCollector:
         )
         return emails[0].get('value')
 
-    def _find_email_from_website(self, website):
-        candidates = [website.rstrip('/')]
-        for path in ('contact', 'contact-us', 'about', 'about-us'):
-            candidates.append(f"{website.rstrip('/')}/{path}")
-
-        email_pattern = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.IGNORECASE)
-        blocked_domains = {'example.com', 'domain.com', 'email.com'}
+    def _find_email_from_website(self, website, school_name=None):
+        candidates = self._build_email_candidate_urls(website)
+        checked = set()
+        found_emails = []
 
         for url in candidates:
+            if url in checked or len(checked) >= Config.WEBSITE_EMAIL_MAX_PAGES:
+                continue
+            checked.add(url)
             try:
                 response = requests.get(
                     url,
-                    timeout=3,
-                    headers={'User-Agent': 'Mozilla/5.0 PathshalaPro lead enrichment'}
+                    timeout=8,
+                    allow_redirects=True,
+                    headers={'User-Agent': 'Mozilla/5.0 (compatible; PathshalaPro lead email enrichment)'}
                 )
                 if response.status_code >= 400:
                     continue
+                content_type = response.headers.get('Content-Type', '').lower()
+                if content_type and not any(token in content_type for token in ('html', 'text', 'json')):
+                    continue
 
-                emails = []
                 soup = BeautifulSoup(response.text, 'html.parser')
-                for link in soup.select('a[href^="mailto:"]'):
-                    emails.extend(email_pattern.findall(link.get('href', '')))
-                emails.extend(email_pattern.findall(response.text))
+                found_emails.extend(self._extract_emails_from_html(response.text, soup))
 
-                for email in emails:
-                    email = email.strip().strip('.,;:')
-                    email_domain = email.split('@')[-1].lower()
-                    if email_domain in blocked_domains:
-                        continue
-                    if email.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg')):
-                        continue
-                    return email
+                if len(checked) < Config.WEBSITE_EMAIL_MAX_PAGES:
+                    for link in self._discover_email_candidate_links(url, soup):
+                        if link not in checked and link not in candidates:
+                            candidates.append(link)
             except Exception as e:
                 logger.debug(f"Website email lookup failed for {url}: {e}")
 
-        return None
+        return self._pick_best_email(found_emails, website, school_name)
+
+    def _build_email_candidate_urls(self, website):
+        base = website.rstrip('/')
+        parsed = urlparse(base)
+        urls = [base]
+        paths = (
+            'contact', 'contact-us', 'contacts', 'about', 'about-us', 'admission',
+            'admissions', 'apply', 'enquiry', 'inquiry', 'support', 'privacy-policy'
+        )
+
+        for path in paths:
+            urls.append(f"{base}/{path}")
+
+        if 'facebook.com' in parsed.netloc.lower():
+            path = parsed.path.strip('/')
+            if path:
+                urls.extend([
+                    f"https://www.facebook.com/{path}/about",
+                    f"https://m.facebook.com/{path}/about",
+                    f"https://m.facebook.com/{path}"
+                ])
+
+        return list(dict.fromkeys(urls))
+
+    def _discover_email_candidate_links(self, current_url, soup):
+        wanted = re.compile(
+            r'(contact|about|admission|enquiry|inquiry|support|privacy|যোগাযোগ|ভর্তি)',
+            re.IGNORECASE
+        )
+        links = []
+        current_host = urlparse(current_url).netloc.lower().replace('www.', '')
+
+        for link in soup.select('a[href]'):
+            href = link.get('href', '').strip()
+            label = link.get_text(' ', strip=True)
+            if not href or href.startswith(('#', 'javascript:', 'tel:', 'mailto:')):
+                continue
+            if not wanted.search(f"{href} {label}"):
+                continue
+
+            target = urljoin(current_url, href).split('#', 1)[0].rstrip('/')
+            parsed = urlparse(target)
+            target_host = parsed.netloc.lower().replace('www.', '')
+            if target_host and target_host != current_host:
+                continue
+            links.append(target)
+
+        return list(dict.fromkeys(links))[:8]
+
+    def _extract_emails_from_html(self, html, soup):
+        values = []
+        for link in soup.select('a[href^="mailto:"]'):
+            values.append(unquote(link.get('href', '')))
+            values.append(link.get_text(' ', strip=True))
+
+        for script in soup(['script', 'style']):
+            script.decompose()
+        values.append(soup.get_text(' ', strip=True))
+        values.append(html)
+
+        emails = []
+        for value in values:
+            normalized = self._normalize_obfuscated_email_text(value)
+            emails.extend(self._EMAIL_PATTERN.findall(normalized))
+        return emails
+
+    def _normalize_obfuscated_email_text(self, value):
+        text = unescape(value or '')
+        replacements = [
+            (r'\s*(?:\[|\()\s*at\s*(?:\]|\))\s*', '@'),
+            (r'\s+at\s+', '@'),
+            (r'\s*(?:\[|\()\s*dot\s*(?:\]|\))\s*', '.'),
+            (r'\s+dot\s+', '.'),
+            (r'\s*\[email\s+protected\]\s*', '@'),
+        ]
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
+
+    _EMAIL_PATTERN = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.IGNORECASE)
+
+    def _pick_best_email(self, emails, website, school_name=None):
+        clean_emails = []
+        blocked_domains = {
+            'example.com', 'domain.com', 'email.com', 'sentry.io', 'wixpress.com',
+            'facebook.com', 'facebookmail.com'
+        }
+        blocked_prefixes = ('noreply', 'no-reply', 'donotreply', 'example', 'test')
+        preferred_prefixes = (
+            'info', 'contact', 'admin', 'admission', 'admissions', 'support',
+            'principal', 'office', 'hello', 'mail'
+        )
+        website_domain = urlparse(website).netloc.lower().replace('www.', '')
+
+        for raw_email in emails:
+            email = raw_email.strip().strip('.,;:()[]{}<>').lower()
+            if not email or '@' not in email:
+                continue
+            if email.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.css', '.js')):
+                continue
+            local, domain = email.rsplit('@', 1)
+            if domain in blocked_domains or any(local.startswith(prefix) for prefix in blocked_prefixes):
+                continue
+            if len(local) > 64 or len(email) > 254:
+                continue
+            clean_emails.append(email)
+
+        if not clean_emails:
+            return None
+
+        def score(email):
+            local, domain = email.rsplit('@', 1)
+            value = 0
+            if website_domain and domain == website_domain:
+                value += 40
+            elif website_domain and website_domain.endswith(domain):
+                value += 20
+            if local in preferred_prefixes:
+                value += 25
+            if any(word in local for word in ('admission', 'info', 'contact', 'office')):
+                value += 10
+            if school_name:
+                normalized_name = re.sub(r'[^a-z0-9]+', '', school_name.lower())
+                if normalized_name and normalized_name[:8] in re.sub(r'[^a-z0-9]+', '', email):
+                    value += 5
+            return value
+
+        return sorted(set(clean_emails), key=lambda email: (-score(email), email))[0]
 
     def _find_phone_from_website(self, website):
         candidates = [website.rstrip('/')]
@@ -485,16 +611,19 @@ class LeadCollector:
 
         return None
 
-    def enrich_missing_emails(self, limit=50, commit_every=10):
+    def enrich_missing_emails(self, limit=50, commit_every=10, force=False):
         """Enrich a small quota-aware batch of active leads with websites."""
         cutoff = datetime.utcnow() - timedelta(days=14)
-        leads = Lead.query.filter(
+        filters = [
             or_(Lead.email == None, Lead.email == ''),
             Lead.website != None,
             Lead.website != '',
             or_(Lead.active_status == None, Lead.active_status != 'closed'),
-            or_(Lead.email_checked_at == None, Lead.email_checked_at < cutoff)
-        ).limit(limit).all()
+        ]
+        if not force:
+            filters.append(or_(Lead.email_checked_at == None, Lead.email_checked_at < cutoff))
+
+        leads = Lead.query.filter(*filters).order_by(Lead.email_checked_at.asc().nullsfirst()).limit(limit).all()
 
         updated = 0
         checked = 0
@@ -516,7 +645,7 @@ class LeadCollector:
         db.session.commit()
         logger.info(
             f"Email enrichment checked {checked}, updated {updated} leads, "
-            f"hunter_searches={hunter_searches}"
+            f"hunter_searches={hunter_searches}, force={force}"
         )
         return updated
 

@@ -225,7 +225,8 @@ def index():
             'stats': '/stats',
             'scheduler_jobs': '/scheduler/jobs',
             'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
-            'enrich_contact_info': 'POST /trigger/enrich-contact-info'
+            'enrich_contact_info': 'POST /trigger/enrich-contact-info',
+            'find_emails': 'POST /trigger/find-emails'
         }
     }), 200
 
@@ -502,7 +503,7 @@ def trigger_sync_leads_to_sheets():
 def trigger_enrich_contact_info():
     """Manually enrich existing leads with missing phone, website, and email."""
     try:
-        limit = request.json.get('limit', 500) if request.is_json else 500
+        limit = request.json.get('limit', Config.CONTACT_ENRICH_LIMIT) if request.is_json else Config.CONTACT_ENRICH_LIMIT
         find_email = request.json.get('find_email', False) if request.is_json else False
         updated = lead_collector.enrich_missing_contact_info(limit=limit, find_email=find_email)
         sheet_result = reporting_manager.sync_leads_to_sheet()
@@ -609,6 +610,29 @@ def trigger_report():
         }), 200
     except Exception as e:
         logger.error(f"Report trigger error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/trigger/find-emails', methods=['POST'])
+@require_admin
+def trigger_find_emails():
+    """Manually run public website and quota-aware email enrichment."""
+    try:
+        limit = request.json.get('limit', Config.EMAIL_ENRICH_LIMIT) if request.is_json else Config.EMAIL_ENRICH_LIMIT
+        force = bool(request.json.get('force', False)) if request.is_json else False
+        updated = lead_collector.enrich_missing_emails(limit=limit, force=force)
+        sheet_result = reporting_manager.sync_leads_to_sheet()
+        return jsonify({
+            'status': 'success',
+            'updated': updated,
+            'sheet_sync': sheet_result,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Email enrichment trigger error: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)
