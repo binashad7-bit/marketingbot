@@ -306,20 +306,34 @@ class LeadCollector:
 
     def find_emails(self, domain, school_name=None):
         """Find one likely email using Hunter first when configured, then public website pages."""
+        email, _ = self._find_email_candidate(domain, school_name, allow_hunter=True)
+        return email
+
+    def _find_email_candidate(self, domain, school_name=None, allow_hunter=True):
         try:
             if not domain or not domain.startswith('http'):
-                return None
+                return None, False
 
             domain_name = urlparse(domain).netloc.lower().replace('www.', '')
-            if self.hunter_api_key and Config.EMAIL_FINDER_PROVIDER in ('hunter', 'auto'):
+            if self.hunter_api_key and Config.EMAIL_FINDER_PROVIDER == 'hunter' and allow_hunter:
                 hunter_email = self._find_email_with_hunter(domain_name)
                 if hunter_email:
-                    return hunter_email
+                    return hunter_email, True
 
-            return self._find_email_from_website(domain)
+            website_email = self._find_email_from_website(domain)
+            if website_email:
+                return website_email, False
+
+            if self.hunter_api_key and Config.EMAIL_FINDER_PROVIDER == 'auto' and allow_hunter:
+                hunter_email = self._find_email_with_hunter(domain_name)
+                if hunter_email:
+                    return hunter_email, True
+                return None, True
+
+            return None, False
         except Exception as e:
             logger.warning(f"Email finder error: {e}")
-            return None
+            return None, False
 
     def _find_email_with_hunter(self, domain_name):
         url = "https://api.hunter.io/v2/domain-search"
@@ -394,8 +408,12 @@ class LeadCollector:
 
         updated = 0
         checked = 0
+        hunter_searches = 0
         for lead in leads:
-            email = self.find_emails(lead.website, lead.school_name)
+            allow_hunter = hunter_searches < Config.HUNTER_SEARCHES_PER_RUN
+            email, hunter_used = self._find_email_candidate(lead.website, lead.school_name, allow_hunter=allow_hunter)
+            if hunter_used:
+                hunter_searches += 1
             lead.email_checked_at = datetime.utcnow()
             checked += 1
             if email:
@@ -405,7 +423,10 @@ class LeadCollector:
                 db.session.commit()
 
         db.session.commit()
-        logger.info(f"Email enrichment checked {checked}, updated {updated} leads")
+        logger.info(
+            f"Email enrichment checked {checked}, updated {updated} leads, "
+            f"hunter_searches={hunter_searches}"
+        )
         return updated
 
     def clean_and_score_leads(self):

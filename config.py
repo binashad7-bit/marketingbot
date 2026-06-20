@@ -107,6 +107,7 @@ class Config:
     SHEET_SYNC_INTERVAL_MINUTES = int(os.getenv('SHEET_SYNC_INTERVAL_MINUTES', 60))
     CONTACT_ENRICH_LIMIT = int(os.getenv('CONTACT_ENRICH_LIMIT', 500))
     EMAIL_ENRICH_LIMIT = int(os.getenv('EMAIL_ENRICH_LIMIT', 25))
+    HUNTER_SEARCHES_PER_RUN = int(os.getenv('HUNTER_SEARCHES_PER_RUN', 10))
     
     # Schedule Configuration
     SCHEDULE_CONFIG = {
