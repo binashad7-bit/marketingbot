@@ -15,6 +15,37 @@ def normalize_database_url(url):
     return url
 
 
+def _csv_list_env(name, default_values):
+    """Read comma-separated env values while keeping a sane Python default."""
+    raw = os.getenv(name)
+    if not raw:
+        return default_values
+    return [item.strip() for item in raw.split(',') if item.strip()]
+
+
+BANGLADESH_DISTRICTS = [
+    'Dhaka', 'Faridpur', 'Gazipur', 'Gopalganj', 'Kishoreganj', 'Madaripur',
+    'Manikganj', 'Munshiganj', 'Narayanganj', 'Narsingdi', 'Rajbari',
+    'Shariatpur', 'Tangail', 'Chattogram', "Cox's Bazar", 'Cumilla',
+    'Brahmanbaria', 'Chandpur', 'Feni', 'Khagrachhari', 'Lakshmipur',
+    'Noakhali', 'Rangamati', 'Bandarban', 'Rajshahi', 'Bogura', 'Joypurhat',
+    'Naogaon', 'Natore', 'Chapainawabganj', 'Pabna', 'Sirajganj', 'Khulna',
+    'Bagerhat', 'Chuadanga', 'Jashore', 'Jhenaidah', 'Kushtia', 'Magura',
+    'Meherpur', 'Narail', 'Satkhira', 'Barishal', 'Barguna', 'Bhola',
+    'Jhalokati', 'Patuakhali', 'Pirojpur', 'Sylhet', 'Habiganj',
+    'Moulvibazar', 'Sunamganj', 'Rangpur', 'Dinajpur', 'Gaibandha',
+    'Kurigram', 'Lalmonirhat', 'Nilphamari', 'Panchagarh', 'Thakurgaon',
+    'Mymensingh', 'Jamalpur', 'Netrokona', 'Sherpur'
+]
+
+
+INSTITUTE_KEYWORDS = [
+    'school', 'high school', 'primary school', 'college', 'kindergarten',
+    'madrasa', 'madrasah', 'coaching center', 'academy', 'institute',
+    'polytechnic institute', 'technical school', 'training center'
+]
+
+
 class Config:
     """বেস কনফিগারেশন"""
     
@@ -66,6 +97,16 @@ class Config:
     ENABLE_LEAD_COLLECTION = os.getenv('ENABLE_LEAD_COLLECTION', 'true').lower() == 'true'
     ENABLE_MARKETING_JOBS = os.getenv('ENABLE_MARKETING_JOBS', 'true').lower() == 'true'
     ENABLE_REPORTING_JOBS = os.getenv('ENABLE_REPORTING_JOBS', 'true').lower() == 'true'
+    LEAD_COLLECTION_DISTRICTS = _csv_list_env('LEAD_COLLECTION_DISTRICTS', BANGLADESH_DISTRICTS)
+    LEAD_COLLECTION_KEYWORDS = _csv_list_env('LEAD_COLLECTION_KEYWORDS', INSTITUTE_KEYWORDS)
+    LEAD_COLLECTION_QUERIES_PER_RUN = int(os.getenv('LEAD_COLLECTION_QUERIES_PER_RUN', 16))
+    LEAD_COLLECTION_RESULTS_PER_QUERY = int(os.getenv('LEAD_COLLECTION_RESULTS_PER_QUERY', 60))
+    LEAD_COLLECTION_INTERVAL_MINUTES = int(os.getenv('LEAD_COLLECTION_INTERVAL_MINUTES', 120))
+    CONTACT_ENRICH_INTERVAL_MINUTES = int(os.getenv('CONTACT_ENRICH_INTERVAL_MINUTES', 180))
+    EMAIL_ENRICH_INTERVAL_MINUTES = int(os.getenv('EMAIL_ENRICH_INTERVAL_MINUTES', 240))
+    SHEET_SYNC_INTERVAL_MINUTES = int(os.getenv('SHEET_SYNC_INTERVAL_MINUTES', 60))
+    CONTACT_ENRICH_LIMIT = int(os.getenv('CONTACT_ENRICH_LIMIT', 500))
+    EMAIL_ENRICH_LIMIT = int(os.getenv('EMAIL_ENRICH_LIMIT', 25))
     
     # Schedule Configuration
     SCHEDULE_CONFIG = {

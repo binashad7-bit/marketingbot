@@ -1,183 +1,362 @@
-import requests
-import time
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
-from datetime import datetime
-from loguru import logger
-from config import Config
-from src.database import Lead, add_lead, db
-import json
 import random
 import re
+import time
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, unquote, urlparse
+
+import requests
+from bs4 import BeautifulSoup
+from loguru import logger
+from sqlalchemy import or_
+
+from config import Config
+from src.database import Lead, add_lead, db
 
 logger.add("logs/lead_collection.log", rotation="500 MB")
 
 
 class LeadCollector:
-    """লিড সংগ্রহের মূল ক্লাস"""
-    
+    """Autonomous lead collection and enrichment for Bangladesh institutes."""
+
+    CLOSED_STATUSES = {'CLOSED_PERMANENTLY', 'CLOSED_TEMPORARILY'}
+    CLOSED_NAME_PATTERN = re.compile(
+        r'\b(permanently\s+closed|temporarily\s+closed|closed)\b|বন্ধ',
+        re.IGNORECASE
+    )
+
     def __init__(self):
         self.google_maps_api_key = Config.GOOGLE_MAPS_API_KEY
         self.hunter_api_key = Config.HUNTER_API_KEY
-        
-    def collect_from_google_maps(self):
-        """Google Maps API থেকে স্কুল খুঁজে পাওয়া"""
-        logger.info("শুরু: Google Maps থেকে লিড সংগ্রহ...")
-        
-        districts = ['Dhaka', 'Chittagong', 'Sylhet', 'Khulna', 'Rajshahi']
-        keywords = ['school', 'coaching center', 'madrasa', 'kindergarten']
-        
-        total_collected = 0
-        
-        for district in districts:
-            for keyword in keywords:
-                try:
-                    # Google Maps সার্চ কোয়েরি
-                    search_query = f"{keyword} in {district}, Bangladesh"
-                    
-                    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-                    params = {
-                        'query': search_query,
-                        'key': self.google_maps_api_key
-                    }
-                    
-                    response = requests.get(url, params=params, timeout=10)
-                    results = response.json().get('results', [])
-                    
-                    for place in results:
-                        try:
-                            # প্লেস ডিটেইলস পাওয়া
-                            place_id = place['place_id']
-                            name = place.get('name', '')
-                            address = place.get('formatted_address', '')
-                            
-                            # ফোন নম্বর পাওয়ার জন্য place details API কল করা
-                            details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-                            details_params = {
-                                'place_id': place_id,
-                                'fields': 'formatted_phone_number,international_phone_number,website,formatted_address',
-                                'key': self.google_maps_api_key
-                            }
-                            
-                            details_response = requests.get(details_url, params=details_params, timeout=10)
-                            place_details = details_response.json().get('result', {})
-                            
-                            phone = (
-                                place_details.get('formatted_phone_number')
-                                or place_details.get('international_phone_number')
-                                or ''
-                            )
-                            website = self._clean_website_url(place_details.get('website', ''))
-                            email = self.find_emails(website, name) if website else None
-                            
-                            # লিড ডাটাবেসে যোগ করা
-                            if name and (phone or address):
-                                lead = add_lead(
-                                    school_name=name,
-                                    phone=phone.replace('+880', '0') if phone else None,
-                                    email=email,
-                                    district=district,
-                                    type=self._identify_type(keyword),
-                                    source='google_maps',
-                                    website=website,
-                                    address=address
-                                )
-                                
-                                if lead:
-                                    total_collected += 1
-                                    logger.info(f"✓ সংগৃহীত: {name} ({district})")
-                            
-                            # Google Maps API রেট লিমিট এড়ানোর জন্য
-                            time.sleep(random.uniform(0.5, 1.5))
-                        
-                        except Exception as e:
-                            logger.warning(f"Place error: {e}")
-                            continue
-                    
-                except Exception as e:
-                    logger.error(f"Google Maps error: {e}")
-                    continue
-        
-        logger.info(f"✓ Google Maps সংগ্রহ সম্পূর্ণ: {total_collected} লিড")
-        return total_collected
-    
-    
+
+    def run_autonomous_cycle(self):
+        """Run one safe, repeatable lead-only cycle."""
+        logger.info("=" * 50)
+        logger.info("Autonomous lead generation cycle started")
+        logger.info("=" * 50)
+
+        maps_count = self.collect_from_google_maps()
+        contact_updates = self.enrich_missing_contact_info(
+            limit=Config.CONTACT_ENRICH_LIMIT,
+            find_email=False
+        )
+        email_updates = self.enrich_missing_emails(limit=Config.EMAIL_ENRICH_LIMIT)
+        self.clean_and_score_leads()
+
+        sheet_sync = {'synced': 0, 'worksheet': None}
+        try:
+            from src.reporting import reporting_manager
+            sheet_sync = reporting_manager.sync_leads_to_sheet()
+        except Exception as e:
+            logger.warning(f"Lead sheet sync skipped during cycle: {e}")
+
+        result = {
+            'maps_upserts': maps_count,
+            'contact_updates': contact_updates,
+            'email_updates': email_updates,
+            'sheet_sync': sheet_sync
+        }
+        logger.info(f"Autonomous lead generation cycle finished: {result}")
+        return result
+
+    def collect_from_google_maps(self, districts=None, keywords=None, max_queries=None, results_per_query=None):
+        """Collect operational institute leads from Google Places."""
+        if not self.google_maps_api_key:
+            logger.error("GOOGLE_MAPS_API_KEY missing; Google Maps collection skipped")
+            return 0
+
+        districts = districts or Config.LEAD_COLLECTION_DISTRICTS
+        keywords = keywords or Config.LEAD_COLLECTION_KEYWORDS
+        max_queries = max_queries or Config.LEAD_COLLECTION_QUERIES_PER_RUN
+        results_per_query = results_per_query or Config.LEAD_COLLECTION_RESULTS_PER_QUERY
+
+        query_plan = [(district, keyword) for district in districts for keyword in keywords]
+        random.shuffle(query_plan)
+        query_plan = query_plan[:max_queries]
+
+        total_upserts = 0
+        for district, keyword in query_plan:
+            try:
+                total_upserts += self._collect_google_maps_query(keyword, district, results_per_query)
+            except Exception as e:
+                logger.error(f"Google Maps query failed for {keyword} in {district}: {e}")
+
+        logger.info(f"Google Maps collection complete: {total_upserts} leads upserted")
+        return total_upserts
+
+    def _collect_google_maps_query(self, keyword, district, results_per_query):
+        search_query = f"{keyword} in {district}, Bangladesh"
+        url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+        params = {'query': search_query, 'key': self.google_maps_api_key}
+        page_token = None
+        seen_results = 0
+        upserts = 0
+
+        logger.info(f"Collecting Google Maps leads: {search_query}")
+        while seen_results < results_per_query:
+            if page_token:
+                time.sleep(2.2)
+                params = {'pagetoken': page_token, 'key': self.google_maps_api_key}
+
+            data = self._get_json(url, params)
+            status = data.get('status')
+            if status == 'ZERO_RESULTS':
+                break
+            if status not in ('OK', None):
+                logger.warning(f"Google Places status={status} query={search_query} error={data.get('error_message')}")
+                break
+
+            results = data.get('results', [])
+            if not results:
+                break
+
+            for place in results:
+                if seen_results >= results_per_query:
+                    break
+                seen_results += 1
+                lead = self._process_google_place(place, district, keyword)
+                if lead:
+                    upserts += 1
+                time.sleep(random.uniform(0.2, 0.6))
+
+            page_token = data.get('next_page_token')
+            if not page_token:
+                break
+
+        return upserts
+
+    def _process_google_place(self, place, district, keyword):
+        place_id = place.get('place_id')
+        name = (place.get('name') or '').strip()
+        if not place_id or not name or self._looks_closed(name):
+            return None
+
+        business_status = place.get('business_status')
+        if business_status in self.CLOSED_STATUSES:
+            return None
+
+        details = self._fetch_place_details(place_id)
+        details_status = details.get('business_status') or business_status
+        if details_status in self.CLOSED_STATUSES:
+            return None
+
+        address = details.get('formatted_address') or place.get('formatted_address') or ''
+        phone = self._clean_phone(
+            details.get('formatted_phone_number') or details.get('international_phone_number')
+        )
+        website = self._clean_website_url(details.get('website') or '')
+        rating = details.get('rating') or place.get('rating')
+        user_ratings_total = details.get('user_ratings_total') or place.get('user_ratings_total')
+
+        if not (address or phone or website):
+            return None
+
+        active_status = self._active_status_from_business_status(details_status)
+        return add_lead(
+            school_name=name,
+            phone=phone,
+            email=None,
+            district=district,
+            type=self._identify_type(keyword),
+            source='google_maps',
+            website=website,
+            address=address,
+            place_id=place_id,
+            business_status=details_status,
+            active_status=active_status,
+            rating=rating,
+            user_ratings_total=user_ratings_total,
+            last_checked_at=datetime.utcnow()
+        )
+
+    def _fetch_place_details(self, place_id):
+        details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+        details_params = {
+            'place_id': place_id,
+            'fields': (
+                'name,formatted_phone_number,international_phone_number,website,'
+                'formatted_address,business_status,rating,user_ratings_total'
+            ),
+            'key': self.google_maps_api_key
+        }
+        data = self._get_json(details_url, details_params)
+        return data.get('result', {})
+
+    def _get_json(self, url, params):
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        return response.json()
+
     def collect_from_facebook_groups(self):
-        """Facebook গ্রুপ থেকে লিড সংগ্রহ"""
-        logger.info("শুরু: Facebook গ্রুপ থেকে লিড সংগ্রহ...")
-        
-        groups = [
-            'bd-school-principals',
-            'coaching-centers-bd',
-            'teachers-community-bd',
-            'bangladesh-education'
-        ]
-        
-        total_collected = 0
-        
-        # নোট: Facebook সরাসরি স্ক্র্যাপিং এ সীমাবদ্ধতা আছে
-        # এই অংশটি ম্যানুয়াল বা ফেসবুক অ্যাপি দিয়ে করা উচিত
-        logger.warning("Facebook স্ক্র্যাপিং: Facebook API ব্যবহার করা সুপারিশ করা হয়")
-        
-        return total_collected
-    
-    
+        logger.info("Facebook collection skipped: use official Meta APIs after developer access is ready")
+        return 0
+
+    def collect_from_linkedin(self):
+        logger.info("LinkedIn collection skipped: use official API-approved sources only")
+        return 0
+
+    def enrich_missing_contact_info(self, limit=500, find_email=False, commit_every=25):
+        """Refresh Google details for leads missing phone, website, status, or place_id."""
+        cutoff = datetime.utcnow() - timedelta(days=7)
+        leads = Lead.query.filter(
+            Lead.source == 'google_maps',
+            or_(Lead.active_status == None, Lead.active_status != 'closed'),
+            or_(
+                Lead.phone == None,
+                Lead.phone == '',
+                Lead.website == None,
+                Lead.website == '',
+                Lead.place_id == None,
+                Lead.business_status == None,
+                Lead.last_enriched_at == None,
+                Lead.last_enriched_at < cutoff
+            )
+        ).limit(limit).all()
+
+        updated = 0
+        for lead in leads:
+            try:
+                details = self._lookup_place_details(lead.school_name, lead.district, lead.place_id)
+                lead.last_enriched_at = datetime.utcnow()
+                if not details:
+                    continue
+
+                changed = self._apply_place_details_to_lead(lead, details)
+                if find_email and lead.website and not lead.email:
+                    email = self.find_emails(lead.website, lead.school_name)
+                    lead.email_checked_at = datetime.utcnow()
+                    if email:
+                        lead.email = email
+                        changed = True
+
+                if changed:
+                    updated += 1
+                if updated and updated % commit_every == 0:
+                    db.session.commit()
+
+                time.sleep(random.uniform(0.2, 0.7))
+            except Exception as e:
+                db.session.rollback()
+                logger.warning(f"Contact enrichment failed for {lead.school_name}: {e}")
+
+        db.session.commit()
+        logger.info(f"Contact enrichment updated {updated} leads")
+        return updated
+
+    def _lookup_place_details(self, school_name, district=None, place_id=None):
+        if place_id:
+            details = self._fetch_place_details(place_id)
+            details['place_id'] = place_id
+            return details
+
+        if not school_name:
+            return None
+
+        query = f"{school_name}, {district}, Bangladesh" if district else f"{school_name}, Bangladesh"
+        search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+        data = self._get_json(search_url, {'query': query, 'key': self.google_maps_api_key})
+        results = data.get('results', [])
+        if not results:
+            return None
+
+        place = results[0]
+        place_id = place.get('place_id')
+        if not place_id:
+            return None
+
+        details = self._fetch_place_details(place_id)
+        details['place_id'] = place_id
+        details['business_status'] = details.get('business_status') or place.get('business_status')
+        details['rating'] = details.get('rating') or place.get('rating')
+        details['user_ratings_total'] = details.get('user_ratings_total') or place.get('user_ratings_total')
+        return details
+
+    def _apply_place_details_to_lead(self, lead, details):
+        changed = False
+        business_status = details.get('business_status')
+        active_status = self._active_status_from_business_status(business_status)
+
+        updates = {
+            'place_id': details.get('place_id'),
+            'business_status': business_status,
+            'active_status': active_status,
+            'phone': self._clean_phone(details.get('formatted_phone_number') or details.get('international_phone_number')),
+            'website': self._clean_website_url(details.get('website') or ''),
+            'address': details.get('formatted_address') or '',
+            'rating': details.get('rating'),
+            'user_ratings_total': details.get('user_ratings_total'),
+            'last_checked_at': datetime.utcnow(),
+        }
+
+        for field, value in updates.items():
+            if value in (None, ''):
+                continue
+            if field in {'business_status', 'active_status', 'rating', 'user_ratings_total', 'last_checked_at'}:
+                if getattr(lead, field) != value:
+                    setattr(lead, field, value)
+                    changed = True
+            elif getattr(lead, field) in (None, ''):
+                setattr(lead, field, value)
+                changed = True
+
+        if self._looks_closed(lead.school_name) or business_status in self.CLOSED_STATUSES:
+            lead.active_status = 'closed'
+            changed = True
+
+        return changed
+
     def find_emails(self, domain, school_name=None):
-        """Hunter.io বা public website scrape করে ইমেইল খুঁজে পাওয়া"""
+        """Find one likely email using Hunter first when configured, then public website pages."""
         try:
             if not domain or not domain.startswith('http'):
                 return None
-            
-            # URL থেকে ডোমেইন এক্সট্র্যাক্ট করা
-            domain_name = urlparse(domain).netloc
-            
+
+            domain_name = urlparse(domain).netloc.lower().replace('www.', '')
             if self.hunter_api_key and Config.EMAIL_FINDER_PROVIDER in ('hunter', 'auto'):
                 hunter_email = self._find_email_with_hunter(domain_name)
                 if hunter_email:
                     return hunter_email
 
             return self._find_email_from_website(domain)
-        
         except Exception as e:
             logger.warning(f"Email finder error: {e}")
             return None
 
     def _find_email_with_hunter(self, domain_name):
-        """Hunter API থাকলে domain search করা"""
         url = "https://api.hunter.io/v2/domain-search"
-        params = {
-            'domain': domain_name,
-            'limit': 10,
-            'api_key': self.hunter_api_key
-        }
-
+        params = {'domain': domain_name, 'limit': 10, 'api_key': self.hunter_api_key}
         response = requests.get(url, params=params, timeout=10)
-        data = response.json()
+        if response.status_code in (401, 403, 429):
+            logger.warning(f"Hunter lookup skipped for {domain_name}: status={response.status_code}")
+            return None
+        response.raise_for_status()
+        data = response.json().get('data') or {}
+        emails = data.get('emails') or []
+        if not emails:
+            return None
 
-        if data.get('data'):
-            emails = data['data'].get('emails', [])
-            if emails:
-                return emails[0]['value']
-        return None
+        preferred_prefixes = ('info', 'contact', 'admin', 'admission', 'admissions', 'support', 'principal')
+        emails = sorted(
+            emails,
+            key=lambda item: (
+                0 if item.get('value', '').split('@')[0].lower() in preferred_prefixes else 1,
+                -(item.get('confidence') or 0)
+            )
+        )
+        return emails[0].get('value')
 
     def _find_email_from_website(self, website):
-        """Public website pages থেকে mailto/text email খোঁজা"""
         candidates = [website.rstrip('/')]
-        for path in ('contact', 'about'):
+        for path in ('contact', 'contact-us', 'about', 'about-us'):
             candidates.append(f"{website.rstrip('/')}/{path}")
 
         email_pattern = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.IGNORECASE)
-        blocked_domains = {'example.com', 'domain.com'}
+        blocked_domains = {'example.com', 'domain.com', 'email.com'}
 
         for url in candidates:
             try:
                 response = requests.get(
                     url,
-                    timeout=4,
+                    timeout=6,
                     headers={'User-Agent': 'Mozilla/5.0 PathshalaPro lead enrichment'}
                 )
                 if response.status_code >= 400:
@@ -190,181 +369,85 @@ class LeadCollector:
                 emails.extend(email_pattern.findall(response.text))
 
                 for email in emails:
+                    email = email.strip().strip('.,;:')
                     email_domain = email.split('@')[-1].lower()
-                    if email_domain not in blocked_domains and not email.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                        return email
+                    if email_domain in blocked_domains:
+                        continue
+                    if email.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg')):
+                        continue
+                    return email
             except Exception as e:
                 logger.debug(f"Website email lookup failed for {url}: {e}")
 
         return None
 
-    def enrich_missing_emails(self, limit=50):
-        """Website আছে কিন্তু email নেই এমন leads enrich করা"""
+    def enrich_missing_emails(self, limit=50, commit_every=10):
+        """Enrich a small quota-aware batch of active leads with websites."""
+        cutoff = datetime.utcnow() - timedelta(days=14)
         leads = Lead.query.filter(
-            Lead.email == None,
-            Lead.website != None
+            or_(Lead.email == None, Lead.email == ''),
+            Lead.website != None,
+            Lead.website != '',
+            or_(Lead.active_status == None, Lead.active_status != 'closed'),
+            or_(Lead.email_checked_at == None, Lead.email_checked_at < cutoff)
         ).limit(limit).all()
 
         updated = 0
+        checked = 0
         for lead in leads:
             email = self.find_emails(lead.website, lead.school_name)
+            lead.email_checked_at = datetime.utcnow()
+            checked += 1
             if email:
                 lead.email = email
                 updated += 1
+            if checked % commit_every == 0:
                 db.session.commit()
 
         db.session.commit()
-        logger.info(f"Email enrichment updated {updated} leads")
+        logger.info(f"Email enrichment checked {checked}, updated {updated} leads")
         return updated
 
-    def _clean_website_url(self, url):
-        """Normalize Google Places website URLs before storing them in varchar(255)."""
-        if not url:
-            return ''
-
-        url = str(url).strip()
-        parsed = urlparse(url)
-
-        if parsed.netloc.lower() in {'l.facebook.com', 'lm.facebook.com'}:
-            target = parse_qs(parsed.query).get('u', [''])[0]
-            if target:
-                url = unquote(target).strip()
-                parsed = urlparse(url)
-
-        if not parsed.scheme or not parsed.netloc:
-            return ''
-
-        if len(url) > 255:
-            logger.warning(f"Skipping overlong website URL for storage: {url[:120]}...")
-            return ''
-
-        return url
-
-    def enrich_missing_contact_info(self, limit=500, find_email=False, commit_every=25):
-        """Fill missing phone/website/email for existing Google Maps leads."""
-        leads = Lead.query.filter(
-            Lead.source == 'google_maps',
-            (Lead.phone == None) | (Lead.phone == '') | (Lead.website == None) | (Lead.website == '')
-        ).limit(limit).all()
-
-        updated = 0
-        for lead in leads:
-            lead_name = lead.school_name
-            try:
-                details = self._lookup_place_details(lead_name, lead.district)
-                if not details:
-                    continue
-
-                phone = (
-                    details.get('formatted_phone_number')
-                    or details.get('international_phone_number')
-                    or ''
-                )
-                website = self._clean_website_url(details.get('website') or '')
-                address = details.get('formatted_address') or ''
-
-                changed = False
-                if phone and not lead.phone:
-                    lead.phone = phone.replace('+880', '0').strip()
-                    changed = True
-                if website and not lead.website:
-                    lead.website = website
-                    changed = True
-                if address and not lead.address:
-                    lead.address = address
-                    changed = True
-                if find_email and website and not lead.email:
-                    email = self.find_emails(website, lead_name)
-                    if email:
-                        lead.email = email
-                        changed = True
-
-                if changed:
-                    updated += 1
-                    if updated % commit_every == 0:
-                        db.session.commit()
-
-                time.sleep(random.uniform(0.2, 0.7))
-            except Exception as e:
-                db.session.rollback()
-                logger.warning(f"Contact enrichment failed for {lead_name}: {e}")
-
-        db.session.commit()
-        logger.info(f"Contact enrichment updated {updated} leads")
-        return updated
-
-    def _lookup_place_details(self, school_name, district):
-        if not school_name:
-            return None
-
-        query = f"{school_name}, {district}, Bangladesh" if district else f"{school_name}, Bangladesh"
-        search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-        search_response = requests.get(
-            search_url,
-            params={'query': query, 'key': self.google_maps_api_key},
-            timeout=10
-        )
-        results = search_response.json().get('results', [])
-        if not results:
-            return None
-
-        place_id = results[0].get('place_id')
-        if not place_id:
-            return None
-
-        details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-        details_response = requests.get(
-            details_url,
-            params={
-                'place_id': place_id,
-                'fields': 'formatted_phone_number,international_phone_number,website,formatted_address',
-                'key': self.google_maps_api_key
-            },
-            timeout=10
-        )
-        return details_response.json().get('result', {})
-    
-    
-    def collect_from_linkedin(self):
-        """LinkedIn থেকে স্কুল প্রিন্সিপাল খুঁজে পাওয়া"""
-        logger.info("শুরু: LinkedIn থেকে লিড সংগ্রহ...")
-        
-        # নোট: LinkedIn সরাসরি স্ক্র্যাপিং প্রতিবন্ধী
-        # LinkedIn API ব্যবহার করা উচিত (সীমিত অ্যাক্সেস)
-        logger.warning("LinkedIn: Official API ব্যবহার করা উচিত")
-        
-        return 0
-    
-    
     def clean_and_score_leads(self):
-        """লিড ক্লিন এবং স্কোর করা"""
-        logger.info("শুরু: লিড ক্লিনিং এবং স্কোরিং...")
-        
-        from src.database import Lead
-        
-        # Duplicate রিমুভ করা (একই ফোন নম্বর)
-        leads = Lead.query.all()
-        processed_phones = set()
+        """Deduplicate, mark inactive leads, and score usable records."""
+        leads = Lead.query.order_by(Lead.updated_at.desc()).all()
+        seen_place_ids = set()
+        seen_phones = set()
+        seen_keys = set()
         duplicates_removed = 0
-        
+
         for lead in leads:
-            if lead.phone:
-                if lead.phone in processed_phones:
-                    db.session.delete(lead)
-                    duplicates_removed += 1
-                else:
-                    processed_phones.add(lead.phone)
-        
+            duplicate = False
+            if lead.place_id:
+                duplicate = lead.place_id in seen_place_ids
+                seen_place_ids.add(lead.place_id)
+            if not duplicate and lead.phone:
+                duplicate = lead.phone in seen_phones
+                seen_phones.add(lead.phone)
+            if not duplicate and lead.canonical_key:
+                duplicate = lead.canonical_key in seen_keys
+                seen_keys.add(lead.canonical_key)
+
+            if duplicate:
+                db.session.delete(lead)
+                duplicates_removed += 1
+
         db.session.commit()
-        logger.info(f"✓ Duplicates রিমুভ করা: {duplicates_removed}")
-        
-        # লিড স্কোর ক্যালকুলেট করা
+
         leads = Lead.query.all()
-        
         for lead in leads:
+            if self._looks_closed(lead.school_name) or lead.business_status in self.CLOSED_STATUSES:
+                lead.active_status = 'closed'
+                lead.score = 0
+                lead.segment = 'Inactive'
+                continue
+
+            if not lead.active_status:
+                lead.active_status = self._active_status_from_business_status(lead.business_status)
+
             score = 0
-            
-            # ডেটা উপস্থিতি
+            if lead.active_status == 'active':
+                score += 2
             if lead.email:
                 score += 3
             if lead.phone:
@@ -373,77 +456,82 @@ class LeadCollector:
                 score += 2
             if lead.address:
                 score += 1
-            
-            # সেগমেন্ট নির্ধারণ
-            if score >= 5:
+            if (lead.user_ratings_total or 0) >= 5:
+                score += 1
+
+            if score >= 7:
                 segment = 'Hot'
-            elif score >= 3:
+            elif score >= 4:
                 segment = 'Warm'
             else:
                 segment = 'Cold'
-            
+
             lead.score = score
             lead.segment = segment
-        
+
         db.session.commit()
-        logger.info("✓ লিড স্কোরিং সম্পূর্ণ")
-        
-        # স্ট্যাটিস্টিক্স
-        hot = Lead.query.filter_by(segment='Hot').count()
-        warm = Lead.query.filter_by(segment='Warm').count()
-        cold = Lead.query.filter_by(segment='Cold').count()
-        
-        logger.info(f"স্কোর সারমর্ম: Hot={hot}, Warm={warm}, Cold={cold}")
-    
-    
+        logger.info(f"Lead cleaning complete: duplicates_removed={duplicates_removed}")
+
+    def _clean_website_url(self, url):
+        if not url:
+            return ''
+
+        url = str(url).strip()
+        parsed = urlparse(url)
+        if parsed.netloc.lower() in {'l.facebook.com', 'lm.facebook.com'}:
+            target = parse_qs(parsed.query).get('u', [''])[0]
+            if target:
+                url = unquote(target).strip()
+                parsed = urlparse(url)
+
+        if not parsed.scheme or not parsed.netloc:
+            return ''
+        if len(url) > 255:
+            logger.warning(f"Skipping overlong website URL for storage: {url[:120]}...")
+            return ''
+        return url
+
+    def _clean_phone(self, phone):
+        if not phone:
+            return None
+        phone = str(phone).strip().replace(' ', '').replace('-', '')
+        if phone.startswith('+880'):
+            phone = '0' + phone[4:]
+        return phone[:20]
+
+    def _looks_closed(self, name):
+        return bool(name and self.CLOSED_NAME_PATTERN.search(name))
+
+    def _active_status_from_business_status(self, business_status):
+        if business_status in self.CLOSED_STATUSES:
+            return 'closed'
+        if business_status == 'OPERATIONAL':
+            return 'active'
+        return 'unknown'
+
     def _identify_type(self, keyword):
-        """কীওয়ার্ড অনুযায়ী টাইপ নির্ধারণ করা"""
         keyword_lower = keyword.lower()
-        
         if 'coaching' in keyword_lower or 'tuition' in keyword_lower:
             return 'Coaching'
-        elif 'madrasa' in keyword_lower or 'madrasah' in keyword_lower:
+        if 'madrasa' in keyword_lower or 'madrasah' in keyword_lower:
             return 'Madrasa'
-        elif 'kindergarten' in keyword_lower or 'kinder' in keyword_lower:
+        if 'kindergarten' in keyword_lower or 'kinder' in keyword_lower:
             return 'Kindergarten'
-        else:
-            return 'School'
-    
-    
+        if 'college' in keyword_lower:
+            return 'College'
+        if 'polytechnic' in keyword_lower or 'technical' in keyword_lower or 'training' in keyword_lower:
+            return 'Technical'
+        if 'academy' in keyword_lower or 'institute' in keyword_lower:
+            return 'Institute'
+        return 'School'
+
     def run_all(self):
-        """সব কালেকশন চালানো"""
-        logger.info("=" * 50)
-        logger.info("লিড কালেকশন সাইকেল শুরু")
-        logger.info("=" * 50)
-        
-        try:
-            # Google Maps থেকে সংগ্রহ
-            maps_count = self.collect_from_google_maps()
-            
-            # Facebook থেকে সংগ্রহ (যদি সম্ভব)
-            fb_count = self.collect_from_facebook_groups()
-            
-            # LinkedIn থেকে সংগ্রহ (যদি সম্ভব)
-            linkedin_count = self.collect_from_linkedin()
-            
-            # ক্লিন এবং স্কোর করা
-            self.clean_and_score_leads()
-            
-            total = maps_count + fb_count + linkedin_count
-            logger.info(f"✓ মোট সংগৃহীত লিড: {total}")
-            
-            return total
-        
-        except Exception as e:
-            logger.error(f"Lead collection error: {e}")
-            return 0
+        return self.run_autonomous_cycle()
 
 
-# একটি সিঙ্গেল ইনস্ট্যান্স তৈরি করা
 lead_collector = LeadCollector()
 
 
 if __name__ == '__main__':
-    # টেস্টিংয়ের জন্য
     collector = LeadCollector()
-    collector.run_all()
+    collector.run_autonomous_cycle()

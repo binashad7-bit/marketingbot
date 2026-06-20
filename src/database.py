@@ -1,7 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -22,6 +22,15 @@ class Lead(db.Model):
     type = db.Column(db.String(50))  # School/Coaching/Madrasa
     source = db.Column(db.String(100))  # google_maps/facebook/linkedin
     website = db.Column(db.String(255), nullable=True)
+    place_id = db.Column(db.String(255), nullable=True, index=True)
+    business_status = db.Column(db.String(50), nullable=True)
+    active_status = db.Column(db.String(30), default='unknown', index=True)
+    rating = db.Column(db.Float, nullable=True)
+    user_ratings_total = db.Column(db.Integer, nullable=True)
+    canonical_key = db.Column(db.String(255), nullable=True, index=True)
+    last_checked_at = db.Column(db.DateTime, nullable=True)
+    last_enriched_at = db.Column(db.DateTime, nullable=True)
+    email_checked_at = db.Column(db.DateTime, nullable=True)
     
     # Lead Scoring
     score = db.Column(db.Integer, default=0)
@@ -123,28 +132,118 @@ def init_db(app):
     """ডাটাবেস ইনিশিয়ালাইজ করা"""
     with app.app_context():
         db.create_all()
+        ensure_schema()
         print("Database tables ensured")
 
 
+def ensure_schema():
+    """Keep older production databases compatible with new lead columns."""
+    inspector = inspect(db.engine)
+    if 'leads' not in inspector.get_table_names():
+        return
+
+    existing_columns = {column['name'] for column in inspector.get_columns('leads')}
+    column_definitions = {
+        'place_id': 'VARCHAR(255)',
+        'business_status': 'VARCHAR(50)',
+        'active_status': "VARCHAR(30) DEFAULT 'unknown'",
+        'rating': 'FLOAT',
+        'user_ratings_total': 'INTEGER',
+        'canonical_key': 'VARCHAR(255)',
+        'last_checked_at': 'TIMESTAMP',
+        'last_enriched_at': 'TIMESTAMP',
+        'email_checked_at': 'TIMESTAMP',
+    }
+
+    dialect = db.engine.dialect.name
+    for column_name, column_type in column_definitions.items():
+        if column_name in existing_columns:
+            continue
+        if dialect == 'postgresql':
+            statement = f'ALTER TABLE leads ADD COLUMN IF NOT EXISTS {column_name} {column_type}'
+        else:
+            statement = f'ALTER TABLE leads ADD COLUMN {column_name} {column_type}'
+        db.session.execute(text(statement))
+
+    for statement in (
+        'CREATE INDEX IF NOT EXISTS ix_leads_place_id ON leads (place_id)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_active_status ON leads (active_status)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_canonical_key ON leads (canonical_key)',
+    ):
+        db.session.execute(text(statement))
+
+    db.session.commit()
+
+
 def add_lead(school_name, phone, email, district, type, source, **kwargs):
-    """নতুন লিড যোগ করা"""
+    """Create or update a lead using stable identifiers to avoid duplicates."""
     try:
-        lead = Lead(
-            school_name=school_name,
-            phone=phone,
-            email=email,
-            district=district,
-            type=type,
-            source=source,
-            **kwargs
+        phone = _normalize_phone(phone)
+        kwargs['canonical_key'] = kwargs.get('canonical_key') or _build_canonical_key(
+            school_name,
+            district,
+            kwargs.get('address')
         )
-        db.session.add(lead)
+
+        lead = None
+        if kwargs.get('place_id'):
+            lead = Lead.query.filter_by(place_id=kwargs['place_id']).first()
+        if not lead and phone:
+            lead = Lead.query.filter_by(phone=phone).first()
+        if not lead and kwargs.get('canonical_key'):
+            lead = Lead.query.filter_by(canonical_key=kwargs['canonical_key']).first()
+
+        fields = {
+            'school_name': school_name,
+            'phone': phone,
+            'email': email,
+            'district': district,
+            'type': type,
+            'source': source,
+            **kwargs
+        }
+
+        if lead:
+            _merge_lead_fields(lead, fields)
+        else:
+            lead = Lead(**fields)
+            db.session.add(lead)
+
         db.session.commit()
         return lead
     except Exception as e:
         db.session.rollback()
         print(f"Error adding lead: {e}")
         return None
+
+
+def _merge_lead_fields(lead, fields):
+    always_refresh = {
+        'business_status', 'active_status', 'rating', 'user_ratings_total',
+        'last_checked_at', 'last_enriched_at', 'email_checked_at'
+    }
+    for key, value in fields.items():
+        if not hasattr(lead, key) or value in (None, ''):
+            continue
+        current = getattr(lead, key)
+        if current in (None, '') or key in always_refresh:
+            setattr(lead, key, value)
+    lead.updated_at = datetime.utcnow()
+
+
+def _normalize_phone(phone):
+    if not phone:
+        return None
+    phone = str(phone).strip().replace(' ', '').replace('-', '')
+    if phone.startswith('+880'):
+        phone = '0' + phone[4:]
+    return phone[:20]
+
+
+def _build_canonical_key(school_name, district, address=None):
+    values = [school_name or '', district or '', address or '']
+    normalized = '|'.join(' '.join(value.lower().split()) for value in values if value)
+    return normalized[:255] if normalized else None
 
 
 def get_leads_by_segment(segment):
@@ -219,9 +318,13 @@ def get_stats():
     emails_sent = Lead.query.filter_by(email_sent=True).count()
     emails_opened = Lead.query.filter_by(email_opened=True).count()
     converted = Lead.query.filter_by(paid_customer=True).count()
+    active_leads = Lead.query.filter_by(active_status='active').count()
+    closed_leads = Lead.query.filter_by(active_status='closed').count()
     
     return {
         'total_leads': total_leads,
+        'active_leads': active_leads,
+        'closed_leads': closed_leads,
         'hot_leads': hot_leads,
         'warm_leads': warm_leads,
         'cold_leads': cold_leads,

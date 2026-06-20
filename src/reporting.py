@@ -3,6 +3,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from datetime import datetime
 from loguru import logger
+from sqlalchemy import or_
+
 from src.database import Lead, get_stats
 from config import Config
 import json
@@ -169,7 +171,9 @@ class ReportGenerator:
                 logger.info("Google Sheets not connected; skipping lead sync")
                 return {'synced': 0, 'worksheet': None}
 
-            leads = Lead.query.order_by(Lead.created_at.desc()).all()
+            leads = Lead.query.filter(
+                or_(Lead.active_status == None, Lead.active_status != 'closed')
+            ).order_by(Lead.score.desc(), Lead.updated_at.desc()).all()
             worksheet = self._get_or_create_worksheet('Leads')
             rows = [self._lead_sheet_headers()]
 
@@ -184,9 +188,17 @@ class ReportGenerator:
                     lead.website or '',
                     lead.address or '',
                     lead.source or '',
+                    lead.place_id or '',
+                    lead.business_status or '',
+                    lead.active_status or '',
+                    lead.rating or '',
+                    lead.user_ratings_total or '',
                     lead.score or 0,
                     lead.segment or '',
                     lead.status or '',
+                    self._format_dt(lead.last_checked_at),
+                    self._format_dt(lead.last_enriched_at),
+                    self._format_dt(lead.email_checked_at),
                     self._format_dt(lead.created_at),
                     self._format_dt(lead.updated_at)
                 ])
@@ -209,12 +221,14 @@ class ReportGenerator:
         try:
             return self.spreadsheet.worksheet(title)
         except gspread.WorksheetNotFound:
-            return self.spreadsheet.add_worksheet(title=title, rows=1000, cols=20)
+            return self.spreadsheet.add_worksheet(title=title, rows=1000, cols=24)
 
     def _lead_sheet_headers(self):
         return [
             'id', 'school_name', 'type', 'district', 'phone', 'email',
-            'website', 'address', 'source', 'score', 'segment', 'status',
+            'website', 'address', 'source', 'place_id', 'business_status',
+            'active_status', 'rating', 'user_ratings_total', 'score', 'segment',
+            'status', 'last_checked_at', 'last_enriched_at', 'email_checked_at',
             'created_at', 'updated_at'
         ]
 

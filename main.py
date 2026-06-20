@@ -32,6 +32,59 @@ scheduler = BackgroundScheduler(timezone=Config.SCHEDULER_TIMEZONE)
 # পোর্ট সেটআপ
 PORT = os.getenv('PORT', 5000)
 
+LEAD_JOB_IDS = {
+    'lead_generation_cycle',
+    'enrich_contact_info',
+    'find_emails',
+    'clean_leads',
+    'sync_leads_to_sheets'
+}
+
+
+def run_scheduled_job(job_id, func, *args, **kwargs):
+    """Run scheduler jobs inside Flask app context and log failures."""
+    try:
+        logger.info(f"Scheduled job started: {job_id}")
+        with app.app_context():
+            result = func(*args, **kwargs)
+        logger.info(f"Scheduled job finished: {job_id} result={result}")
+        return result
+    except Exception as e:
+        logger.exception(f"Scheduled job failed: {job_id}: {e}")
+        raise
+
+
+def add_interval_job(job_id, name, func, minutes, job_kwargs=None, first_run_delay_minutes=2):
+    scheduler.add_job(
+        func=run_scheduled_job,
+        args=[job_id, func],
+        kwargs=job_kwargs or {},
+        trigger="interval",
+        minutes=minutes,
+        id=job_id,
+        name=name,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=900,
+        next_run_time=datetime.now() + timedelta(minutes=first_run_delay_minutes)
+    )
+
+
+def add_cron_job(job_id, name, func, hour, minute, job_kwargs=None):
+    scheduler.add_job(
+        func=run_scheduled_job,
+        args=[job_id, func],
+        kwargs=job_kwargs or {},
+        trigger="cron",
+        hour=hour,
+        minute=minute,
+        id=job_id,
+        name=name,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=900
+    )
+
 
 def init_scheduler():
     """Set up scheduled jobs based on the configured scheduler mode."""
@@ -58,98 +111,51 @@ def init_scheduler():
     )
 
     if lead_collection_enabled:
-        scheduler.add_job(
-            func=lead_collector.collect_from_google_maps,
-            trigger="cron",
-            hour=1,
-            minute=0,
-            id='collect_google_maps',
-            name='Google Maps lead collection'
+        add_interval_job(
+            'lead_generation_cycle',
+            'Autonomous Google Maps lead generation cycle',
+            lead_collector.run_autonomous_cycle,
+            Config.LEAD_COLLECTION_INTERVAL_MINUTES
         )
-        scheduler.add_job(
-            func=lead_collector.collect_from_facebook_groups,
-            trigger="cron",
-            hour=1,
-            minute=30,
-            id='collect_facebook',
-            name='Facebook group lead collection'
+        add_interval_job(
+            'enrich_contact_info',
+            'Enrich lead phone, website, and active status',
+            lead_collector.enrich_missing_contact_info,
+            Config.CONTACT_ENRICH_INTERVAL_MINUTES,
+            job_kwargs={'limit': Config.CONTACT_ENRICH_LIMIT, 'find_email': False},
+            first_run_delay_minutes=5
         )
-        scheduler.add_job(
-            func=lead_collector.enrich_missing_emails,
-            trigger="cron",
-            hour=2,
-            minute=0,
-            id='find_emails',
-            name='Find lead emails'
+        add_interval_job(
+            'find_emails',
+            'Find lead emails',
+            lead_collector.enrich_missing_emails,
+            Config.EMAIL_ENRICH_INTERVAL_MINUTES,
+            job_kwargs={'limit': Config.EMAIL_ENRICH_LIMIT},
+            first_run_delay_minutes=10
         )
-        scheduler.add_job(
-            func=lead_collector.enrich_missing_contact_info,
-            trigger="cron",
-            hour=2,
-            minute=15,
-            id='enrich_contact_info',
-            name='Enrich lead phone and website'
+        add_interval_job(
+            'clean_leads',
+            'Clean and score leads',
+            lead_collector.clean_and_score_leads,
+            360,
+            first_run_delay_minutes=15
         )
-        scheduler.add_job(
-            func=lead_collector.clean_and_score_leads,
-            trigger="cron",
-            hour=3,
-            minute=0,
-            id='clean_leads',
-            name='Clean and score leads'
-        )
-        scheduler.add_job(
-            func=reporting_manager.sync_leads_to_sheet,
-            trigger="cron",
-            hour=3,
-            minute=15,
-            id='sync_leads_to_sheets',
-            name='Sync leads to Google Sheets'
+        add_interval_job(
+            'sync_leads_to_sheets',
+            'Sync active leads to Google Sheets',
+            reporting_manager.sync_leads_to_sheet,
+            Config.SHEET_SYNC_INTERVAL_MINUTES,
+            first_run_delay_minutes=20
         )
 
     if marketing_enabled:
-        scheduler.add_job(
-            func=email_campaign.run_campaign,
-            trigger="cron",
-            hour=10,
-            minute=30,
-            id='email_campaign',
-            name='Email campaign'
-        )
-        scheduler.add_job(
-            func=whatsapp_campaign.send_campaign,
-            trigger="cron",
-            hour=12,
-            minute=30,
-            id='whatsapp_campaign',
-            name='WhatsApp campaign'
-        )
-        scheduler.add_job(
-            func=facebook_poster.post_daily_content,
-            trigger="cron",
-            hour=14,
-            minute=0,
-            id='facebook_posting',
-            name='Facebook posting'
-        )
-        scheduler.add_job(
-            func=tracking_manager.run_all,
-            trigger="cron",
-            hour=20,
-            minute=0,
-            id='tracking',
-            name='Tracking and metrics'
-        )
+        add_cron_job('email_campaign', 'Email campaign', email_campaign.run_campaign, 10, 30)
+        add_cron_job('whatsapp_campaign', 'WhatsApp campaign', whatsapp_campaign.send_campaign, 12, 30)
+        add_cron_job('facebook_posting', 'Facebook posting', facebook_poster.post_daily_content, 14, 0)
+        add_cron_job('tracking', 'Tracking and metrics', tracking_manager.run_all, 20, 0)
 
     if reporting_enabled:
-        scheduler.add_job(
-            func=reporting_manager.run_daily,
-            trigger="cron",
-            hour=21,
-            minute=30,
-            id='daily_report',
-            name='Daily report'
-        )
+        add_cron_job('daily_report', 'Daily report', reporting_manager.run_daily, 21, 30)
 
     scheduler.start()
     logger.info(f"Scheduler started with {len(scheduler.get_jobs())} jobs")
@@ -226,7 +232,7 @@ def lead_collection_status():
 
         lead_jobs = []
         for job in scheduler.get_jobs():
-            if job.id in ('collect_google_maps', 'collect_facebook', 'find_emails', 'enrich_contact_info', 'clean_leads', 'sync_leads_to_sheets'):
+            if job.id in LEAD_JOB_IDS:
                 lead_jobs.append({
                     'id': job.id,
                     'name': job.name,
@@ -240,6 +246,10 @@ def lead_collection_status():
             'mode': Config.SCHEDULER_MODE,
             'timezone': Config.SCHEDULER_TIMEZONE,
             'total_leads': Lead.query.count(),
+            'active_leads': Lead.query.filter(Lead.active_status == 'active').count(),
+            'closed_or_inactive_leads': Lead.query.filter(Lead.active_status == 'closed').count(),
+            'unknown_active_status_leads': Lead.query.filter((Lead.active_status == None) | (Lead.active_status == 'unknown')).count(),
+            'leads_with_place_id': Lead.query.filter(Lead.place_id != None, Lead.place_id != '').count(),
             'leads_with_phone': Lead.query.filter(Lead.phone != None, Lead.phone != '').count(),
             'leads_with_email': Lead.query.filter(Lead.email != None, Lead.email != '').count(),
             'leads_with_website': Lead.query.filter(Lead.website != None, Lead.website != '').count(),
@@ -263,10 +273,10 @@ def lead_collection_status():
 def trigger_lead_collection():
     """ম্যানুয়ালি লিড সংগ্রহ ট্রিগার করা"""
     try:
-        result = lead_collector.run_all()
+        result = lead_collector.run_autonomous_cycle()
         return jsonify({
             'status': 'success',
-            'message': f'{result} লিড সংগ্রহ করা হয়েছে',
+            'data': result,
             'timestamp': datetime.now().isoformat()
         }), 200
     except Exception as e:
