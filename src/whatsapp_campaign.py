@@ -109,18 +109,24 @@ class WhatsAppCampaign:
         logger.info("=" * 50)
         
         try:
-            # যারা ইমেইল খুলেছে তাদের কাছে মেসেজ পাঠানো
-            engaged_leads = Lead.query.filter(
-                Lead.email_opened == True,
+            # WhatsApp-ready qualified leads যাদের এখনো মেসেজ পাঠানো হয়নি।
+            # ডিফল্টে email-open এর উপর নির্ভরশীল নয় (WhatsApp প্রধান চ্যানেল);
+            # WHATSAPP_REQUIRE_EMAIL_OPEN=true করলে পুরোনো আচরণ ফিরে আসে।
+            query = Lead.query.filter(
+                Lead.phone_valid == True,
                 Lead.whatsapp_sent == False,
-                Lead.phone_valid == True
-            ).all()
-            
-            logger.info(f"এনগেজড লিড: {len(engaged_leads)}")
+                Lead.qualification_status == 'qualified'
+            )
+            if Config.WHATSAPP_REQUIRE_EMAIL_OPEN:
+                query = query.filter(Lead.email_opened == True)
+
+            target_leads = query.order_by(Lead.score.desc()).limit(Config.WHATSAPP_DAILY_LIMIT).all()
+
+            logger.info(f"WhatsApp টার্গেট লিড: {len(target_leads)}")
             
             total_sent = 0
             
-            for lead in engaged_leads:
+            for lead in target_leads:
                 message_text = self._create_message(lead)
                 
                 success, sid = self.send_message(

@@ -628,6 +628,9 @@ def update_lead_status(lead_id, **kwargs):
     """লিড স্ট্যাটাস আপডেট করা"""
     try:
         lead = Lead.query.get(lead_id)
+        if not lead:
+            print(f"update_lead_status: lead {lead_id} not found")
+            return None
         for key, value in kwargs.items():
             if hasattr(lead, key):
                 setattr(lead, key, value)
@@ -655,6 +658,26 @@ def log_email_event(lead_id, subject, status, **kwargs):
     except Exception as e:
         db.session.rollback()
         print(f"Error logging email: {e}")
+        return None
+
+
+def log_followup_event(lead_id, followup_type='email', status='completed', notes=None, scheduled_for=None):
+    """ফলো-আপ ইভেন্ট রেকর্ড করা"""
+    try:
+        followup = FollowUp(
+            lead_id=lead_id,
+            followup_type=followup_type,
+            status=status,
+            notes=notes,
+            scheduled_for=scheduled_for,
+            completed_at=datetime.utcnow() if status == 'completed' else None
+        )
+        db.session.add(followup)
+        db.session.commit()
+        return followup
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error logging followup: {e}")
         return None
 
 

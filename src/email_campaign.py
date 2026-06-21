@@ -1,14 +1,30 @@
 import requests
-from datetime import datetime
+import html as html_lib
+import re
+from datetime import datetime, timedelta
 from loguru import logger
 from config import Config
 from src.database import (
-    Lead, get_leads_by_segment, update_lead_status, 
-    log_email_event, db
+    Lead, get_leads_by_segment, update_lead_status,
+    log_email_event, log_followup_event, db
 )
 import os
 
 logger.add("logs/email_campaign.log", rotation="500 MB")
+
+_URL_RE = re.compile(r'(https?://[^\s<]+)')
+
+
+def _text_to_html(text):
+    """Convert a plain-text email body into safe HTML with clickable links."""
+    escaped = html_lib.escape((text or '').strip())
+
+    def _linkify(match):
+        url = match.group(1)
+        return f'<a href="{url}" style="color:#176a35;">{url}</a>'
+
+    linked = _URL_RE.sub(_linkify, escaped)
+    return linked.replace('\n', '<br>\n')
 
 
 class EmailCampaign:
@@ -28,6 +44,14 @@ class EmailCampaign:
         
         # টেমপ্লেট লোড করা
         self.templates = self._load_templates()
+
+        # ফলো-আপ ড্রিপ সিকোয়েন্স: {current_send_count: (days_gap, template, subject)}
+        self.followup_sequence = {
+            1: (2, 'followup_second', 'মনে করিয়ে দিচ্ছি — {school}'),
+            2: (4, 'followup_video', '৫ মিনিটের ভিডিও ডেমো — {school}'),
+            3: (6, 'objection_price', 'PathshalaPro মূল্য তুলনা — {school}'),
+            4: (8, 'final_offer', 'শেষ সুযোগ: ৫০% ছাড় — {school}'),
+        }
     
     
     def _load_templates(self):
@@ -158,13 +182,40 @@ PathshalaPro টিম
         return templates
     
     
-    def send_email(self, to_email, subject, html_content, lead_id=None, template_name=None):
-        """একটি ইমেইল পাঠানো"""
+    def _build_html_email(self, body_text, lead_id=None):
+        """Wrap a plain-text body in a responsive HTML shell + open-tracking pixel."""
+        inner = _text_to_html(body_text)
+        pixel = ''
+        base_url = (Config.PUBLIC_BASE_URL or '').rstrip('/')
+        if base_url and lead_id:
+            pixel = (
+                f'<img src="{base_url}/track/open/{lead_id}" '
+                'width="1" height="1" alt="" style="display:none">'
+            )
+        return (
+            '<!doctype html><html lang="bn"><head>'
+            '<meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            '</head>'
+            '<body style="margin:0;padding:0;background:#f4f7f6;">'
+            '<div style="max-width:600px;margin:0 auto;padding:24px;'
+            "font-family:Arial,'Hind Siliguri',sans-serif;font-size:15px;"
+            'line-height:1.7;color:#17211d;background:#ffffff;">'
+            f'{inner}'
+            '</div>'
+            f'{pixel}'
+            '</body></html>'
+        )
+
+    def send_email(self, to_email, subject, body_text, lead_id=None, template_name=None):
+        """একটি ইমেইল পাঠানো (plain text → HTML + plaintext উভয়ই)"""
         try:
+            html_content = self._build_html_email(body_text, lead_id)
+            text_content = (body_text or '').strip()
             if self.email_provider == 'brevo':
-                response_status = self._send_with_brevo(to_email, subject, html_content, lead_id, template_name)
+                response_status = self._send_with_brevo(to_email, subject, html_content, text_content, lead_id, template_name)
             elif self.email_provider == 'sendgrid':
-                response_status = self._send_with_sendgrid(to_email, subject, html_content)
+                response_status = self._send_with_sendgrid(to_email, subject, html_content, text_content)
             else:
                 raise ValueError(f"Unsupported EMAIL_PROVIDER: {self.email_provider}")
 
@@ -193,7 +244,7 @@ PathshalaPro টিম
                 )
             return False
 
-    def _send_with_brevo(self, to_email, subject, html_content, lead_id=None, template_name=None):
+    def _send_with_brevo(self, to_email, subject, html_content, text_content=None, lead_id=None, template_name=None):
         """Brevo transactional email API দিয়ে পাঠানো"""
         if not self.brevo_api_key:
             raise ValueError("BREVO_API_KEY is not configured")
@@ -207,6 +258,8 @@ PathshalaPro টিম
             'subject': subject,
             'htmlContent': html_content
         }
+        if text_content:
+            payload['textContent'] = text_content
         tags = [tag for tag in [template_name, f'lead-{lead_id}' if lead_id else None] if tag]
         if tags:
             payload['tags'] = tags
@@ -225,7 +278,7 @@ PathshalaPro টিম
             raise RuntimeError(f"Brevo API error {response.status_code}: {response.text}")
         return response.status_code
 
-    def _send_with_sendgrid(self, to_email, subject, html_content):
+    def _send_with_sendgrid(self, to_email, subject, html_content, text_content=None):
         """পুরোনো SendGrid path রাখতে optional fallback"""
         if not self.sendgrid_api_key:
             raise ValueError("SENDGRID_API_KEY is not configured")
@@ -236,6 +289,7 @@ PathshalaPro টিম
             from_email=Email(self.from_email, self.from_name),
             to_emails=to_email,
             subject=subject,
+            plain_text_content=text_content or None,
             html_content=html_content
         )
         response = self.sg.send(message)
@@ -294,6 +348,7 @@ PathshalaPro টিম
                             lead.id,
                             email_sent=True,
                             email_sent_date=datetime.utcnow(),
+                            last_email_sent=datetime.utcnow(),
                             email_send_count=1
                         )
                         total_sent += 1
@@ -320,6 +375,7 @@ PathshalaPro টিম
                             lead.id,
                             email_sent=True,
                             email_sent_date=datetime.utcnow(),
+                            last_email_sent=datetime.utcnow(),
                             email_send_count=1
                         )
                         total_sent += 1
@@ -346,6 +402,7 @@ PathshalaPro টিম
                             lead.id,
                             email_sent=True,
                             email_sent_date=datetime.utcnow(),
+                            last_email_sent=datetime.utcnow(),
                             email_send_count=1
                         )
                         total_sent += 1
@@ -355,6 +412,55 @@ PathshalaPro টিম
         
         except Exception as e:
             logger.error(f"Campaign error: {e}")
+            return 0
+
+    def run_followups(self):
+        """Send the next drip email to leads already in the sequence."""
+        logger.info("=" * 50)
+        logger.info("ফলো-আপ ইমেইল সিকোয়েন্স শুরু")
+        logger.info("=" * 50)
+
+        try:
+            now = datetime.utcnow()
+            leads = Lead.query.filter(
+                Lead.email_sent == True,
+                Lead.email.isnot(None),
+                Lead.email != '',
+                Lead.paid_customer == False,
+                Lead.status != 'converted',
+                Lead.email_send_count >= 1,
+                Lead.email_send_count <= 4
+            ).all()
+
+            total_sent = 0
+            for lead in leads:
+                step = self.followup_sequence.get(lead.email_send_count or 0)
+                if not step:
+                    continue
+                days_gap, template_key, subject_tpl = step
+                last_sent = lead.last_email_sent or lead.email_sent_date
+                if not last_sent or (now - last_sent) < timedelta(days=days_gap):
+                    continue
+
+                body_text = self._personalize_template(self.templates[template_key], lead)
+                subject = subject_tpl.format(school=lead.school_name or 'আপনার প্রতিষ্ঠান')
+
+                if self.send_email(lead.email, subject, body_text, lead.id, template_key):
+                    new_count = (lead.email_send_count or 0) + 1
+                    update_lead_status(
+                        lead.id,
+                        email_send_count=new_count,
+                        email_sent_date=now,
+                        last_email_sent=now
+                    )
+                    log_followup_event(lead.id, 'email', status='completed', notes=template_key)
+                    total_sent += 1
+
+            logger.info(f"✓ মোট ফলো-আপ ইমেইল পাঠানো: {total_sent}")
+            return total_sent
+
+        except Exception as e:
+            logger.error(f"Follow-up campaign error: {e}")
             return 0
 
 
