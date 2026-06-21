@@ -83,34 +83,51 @@ class FacebookPoster:
         return post_id
     
     
+    def _read_posts_worksheet(self):
+        """Read rows from the 'FacebookPosts' worksheet using the shared connection.
+
+        Expected columns (case-insensitive): day/date, time, content, image_url.
+        Returns a list of dicts or [] when the sheet/worksheet is unavailable.
+        """
+        try:
+            from src.reporting import reporting_manager
+            spreadsheet = reporting_manager.generator.spreadsheet
+            if not spreadsheet:
+                return []
+            try:
+                worksheet = spreadsheet.worksheet('FacebookPosts')
+            except Exception:
+                logger.info("No 'FacebookPosts' worksheet found; using built-in content")
+                return []
+            return worksheet.get_all_records()
+        except Exception as e:
+            logger.warning(f"Facebook posts worksheet read error: {e}")
+            return []
+
     def get_scheduled_posts(self):
         """Google Sheets থেকে শিডিউলড পোস্ট পাওয়া"""
-        try:
-            import gspread
-            from oauth2client.service_account import ServiceAccountCredentials
-            import json
-            
-            # Google Sheets সংযোগ (আপনাকে credentials সেট করতে হবে)
-            # এটি একটি অপশনাল ফিচার - সরাসরি কনফিগ থেকে পোস্ট পাওয়া যায়
-            
-            scheduled_posts = [
-                {
-                    'time': '14:00',  # দুপুর २ PM
-                    'content': 'আপনার লেখা পোস্ট ১',
-                    'image': None
-                },
-                {
-                    'time': '18:00',  # সন্ধ্যা ६ PM
-                    'content': 'আপনার লেখা পোস্ট २',
-                    'image': None
-                }
-            ]
-            
-            return scheduled_posts
-        
-        except Exception as e:
-            logger.warning(f"Schedule retrieval error: {e}")
-            return []
+        scheduled_posts = []
+        for row in self._read_posts_worksheet():
+            content = row.get('content') or row.get('Content')
+            if not content:
+                continue
+            scheduled_posts.append({
+                'time': str(row.get('time') or row.get('Time') or '').strip(),
+                'content': content,
+                'image': row.get('image_url') or row.get('image') or None
+            })
+        return scheduled_posts
+
+    def _content_from_sheet_for_today(self):
+        """Return (content, image_url) configured in the sheet for today, if any."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        weekday = datetime.now().strftime('%A').lower()
+        for row in self._read_posts_worksheet():
+            day = str(row.get('day') or row.get('date') or row.get('Day') or row.get('Date') or '').strip().lower()
+            content = row.get('content') or row.get('Content')
+            if content and day in (today, weekday):
+                return content, (row.get('image_url') or row.get('image') or None)
+        return None, None
     
     
     def run_scheduled_posting(self):
@@ -145,10 +162,20 @@ class FacebookPoster:
     
     
     def post_daily_content(self):
-        """প্রতিদিনের কন্টেন্ট পোস্ট করা (বিভিন্ন দিনে ভিন্ন ভিন্ন)"""
+        """প্রতিদিনের কন্টেন্ট পোস্ট করা (Sheet থেকে, না থাকলে ডিফল্ট)"""
         logger.info("দৈনিক কন্টেন্ট পোস্টিং শুরু")
-        
-        from datetime import datetime
+
+        # প্রথমে Google Sheet ('FacebookPosts') থেকে আজকের কন্টেন্ট খোঁজা
+        sheet_content, sheet_image = self._content_from_sheet_for_today()
+        if sheet_content:
+            logger.info("Sheet থেকে আজকের ফেসবুক কন্টেন্ট ব্যবহার করা হচ্ছে")
+            success, post_id = self.post_to_facebook(sheet_content, sheet_image)
+            if success:
+                logger.info("✓ দৈনিক পোস্ট সফল (Sheet)")
+            else:
+                logger.error("দৈনিক পোস্ট ব্যর্থ (Sheet)")
+            return success
+
         day_of_week = datetime.now().strftime("%A").lower()
         
         daily_content = {

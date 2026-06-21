@@ -1,4 +1,5 @@
 import os
+import re
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -114,6 +115,15 @@ def add_interval_job(job_id, name, func, minutes, job_kwargs=None, first_run_del
     )
 
 
+def _parse_hhmm(value, default_hour, default_minute):
+    """Parse an 'HH:MM' schedule string, falling back to defaults."""
+    try:
+        hour_str, minute_str = str(value).split(':')
+        return int(hour_str), int(minute_str)
+    except (ValueError, AttributeError):
+        return default_hour, default_minute
+
+
 def add_cron_job(job_id, name, func, hour, minute, job_kwargs=None):
     scheduler.add_job(
         func=run_scheduled_job,
@@ -193,13 +203,28 @@ def init_scheduler():
         )
 
     if marketing_enabled:
-        add_cron_job('email_campaign', 'Email campaign', email_campaign.run_campaign, 10, 30)
-        add_cron_job('whatsapp_campaign', 'WhatsApp campaign', whatsapp_campaign.send_campaign, 12, 30)
-        add_cron_job('facebook_posting', 'Facebook posting', facebook_poster.post_daily_content, 14, 0)
-        add_cron_job('tracking', 'Tracking and metrics', tracking_manager.run_all, 20, 0)
+        engagement = Config.SCHEDULE_CONFIG.get('engagement', {})
+        tracking_cfg = Config.SCHEDULE_CONFIG.get('tracking', {})
+
+        hour, minute = _parse_hhmm(engagement.get('email_campaign'), 10, 30)
+        add_cron_job('email_campaign', 'Email campaign', email_campaign.run_campaign, hour, minute)
+
+        hour, minute = _parse_hhmm(engagement.get('whatsapp_campaign'), 12, 30)
+        add_cron_job('whatsapp_campaign', 'WhatsApp campaign', whatsapp_campaign.send_campaign, hour, minute)
+
+        hour, minute = _parse_hhmm(engagement.get('email_followups'), 16, 0)
+        add_cron_job('email_followups', 'Email follow-up drip', email_campaign.run_followups, hour, minute)
+
+        hour, minute = _parse_hhmm(engagement.get('facebook_posting'), 14, 0)
+        add_cron_job('facebook_posting', 'Facebook posting', facebook_poster.post_daily_content, hour, minute)
+
+        hour, minute = _parse_hhmm(tracking_cfg.get('email_tracking'), 20, 0)
+        add_cron_job('tracking', 'Tracking and metrics', tracking_manager.run_all, hour, minute)
 
     if reporting_enabled:
-        add_cron_job('daily_report', 'Daily report', reporting_manager.run_daily, 21, 30)
+        reporting_cfg = Config.SCHEDULE_CONFIG.get('reporting', {})
+        hour, minute = _parse_hhmm(reporting_cfg.get('daily_report'), 21, 30)
+        add_cron_job('daily_report', 'Daily report', reporting_manager.run_daily, hour, minute)
 
     scheduler.start()
     logger.info(f"Scheduler started with {len(scheduler.get_jobs())} jobs")
@@ -540,6 +565,25 @@ def trigger_email_campaign():
         }), 500
 
 
+@app.route('/trigger/email-followups', methods=['POST'])
+@require_admin
+def trigger_email_followups():
+    """ম্যানুয়ালি ফলো-আপ ইমেইল ড্রিপ ট্রিগার করা"""
+    try:
+        result = email_campaign.run_followups()
+        return jsonify({
+            'status': 'success',
+            'message': f'{result} ফলো-আপ ইমেইল পাঠানো হয়েছে',
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Email follow-up trigger error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
 @app.route('/trigger/whatsapp-campaign', methods=['POST'])
 @require_admin
 def trigger_whatsapp_campaign():
@@ -639,32 +683,101 @@ def trigger_find_emails():
         }), 500
 
 
+def _lead_id_from_brevo_tags(event):
+    """Extract the lead id from Brevo event tags like 'lead-123'."""
+    tags = event.get('tags') or event.get('tag') or []
+    if isinstance(tags, str):
+        tags = [tags]
+    for tag in tags:
+        match = re.match(r'lead-(\d+)', str(tag))
+        if match:
+            return int(match.group(1))
+    return None
+
+
+# 1x1 transparent GIF used as an email open-tracking pixel.
+_TRACKING_PIXEL = (
+    b'GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01'
+    b'\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;'
+)
+
+
+@app.route('/track/open/<int:lead_id>', methods=['GET'])
+def track_open(lead_id):
+    """Email open-tracking pixel: stamps the lead as opened, returns a 1x1 GIF."""
+    try:
+        lead = Lead.query.get(lead_id)
+        if lead and not lead.email_opened:
+            lead.email_opened = True
+            lead.email_opened_time = datetime.utcnow()
+            db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Open tracking error for lead {lead_id}: {e}")
+    return app.response_class(
+        _TRACKING_PIXEL,
+        mimetype='image/gif',
+        headers={'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'}
+    )
+
+
+@app.route('/webhooks/brevo', methods=['POST'])
+def brevo_webhook():
+    """Brevo event webhook: marks email_opened / email_clicked on the lead."""
+    try:
+        payload = request.json or {}
+        events = payload if isinstance(payload, list) else [payload]
+
+        for event in events:
+            event_type = (event.get('event') or '').lower()
+            lead_id = _lead_id_from_brevo_tags(event)
+            lead = Lead.query.get(lead_id) if lead_id else None
+            if not lead and event.get('email'):
+                lead = Lead.query.filter_by(email=str(event['email']).strip().lower()).first()
+            if not lead:
+                continue
+
+            if event_type in ('opened', 'unique_opened', 'open'):
+                lead.email_opened = True
+                lead.email_opened_time = datetime.utcnow()
+            elif event_type in ('click', 'clicks', 'unique_clicked'):
+                lead.email_clicked = True
+                if event.get('link'):
+                    lead.clicked_link = str(event['link'])[:255]
+
+        db.session.commit()
+        return jsonify({'status': 'success'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Brevo webhook error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/webhooks/sendgrid', methods=['POST'])
 def sendgrid_webhook():
     """SendGrid ইভেন্ট ওয়েবহুক"""
     try:
-        from src.database import Lead
-        
-        events = request.json
-        
+        events = request.json or []
+
         for event in events:
+            lead_id = event.get('lead_id')
+            if not lead_id:
+                continue
+            lead = Lead.query.get(lead_id)
+            if not lead:
+                continue
             if event.get('event') == 'open':
-                lead_id = event.get('lead_id')
-                lead = Lead.query.get(lead_id)
-                if lead:
-                    lead.email_opened = True
-                    lead.email_opened_time = datetime.utcnow()
-            
+                lead.email_opened = True
+                lead.email_opened_time = datetime.utcnow()
             elif event.get('event') == 'click':
-                lead_id = event.get('lead_id')
-                lead = Lead.query.get(lead_id)
-                if lead:
-                    lead.email_clicked = True
+                lead.email_clicked = True
         
         db.session.commit()
         return jsonify({'status': 'success'}), 200
     
     except Exception as e:
+        db.session.rollback()
         logger.error(f"Webhook error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 

@@ -91,6 +91,14 @@ class Config:
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     PORT = int(os.getenv('PORT', 5000))
     ADMIN_API_TOKEN = os.getenv('ADMIN_API_TOKEN')
+    # Public base URL of the deployed app, used for email open-tracking pixels.
+    PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL')
+
+    # WhatsApp campaign targeting
+    # When false, WhatsApp messages go to every qualified WhatsApp-ready lead
+    # (the realistic primary channel) instead of requiring a prior email open.
+    WHATSAPP_REQUIRE_EMAIL_OPEN = os.getenv('WHATSAPP_REQUIRE_EMAIL_OPEN', 'false').lower() == 'true'
+    WHATSAPP_DAILY_LIMIT = int(os.getenv('WHATSAPP_DAILY_LIMIT', 100))
 
     # Scheduler Settings
     SCHEDULER_TIMEZONE = os.getenv('SCHEDULER_TIMEZONE', 'UTC')
@@ -128,7 +136,8 @@ class Config:
             'lead_scoring': '09:00',
             'email_campaign': '10:30',
             'whatsapp_campaign': '12:30',
-            'facebook_posting': '14:00'
+            'facebook_posting': '14:00',
+            'email_followups': '16:00'
         },
         'tracking': {
             'email_tracking': '20:00',
