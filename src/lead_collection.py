@@ -458,7 +458,10 @@ class LeadCollector:
         urls = [base]
         paths = (
             'contact', 'contact-us', 'contacts', 'about', 'about-us', 'admission',
-            'admissions', 'apply', 'enquiry', 'inquiry', 'support', 'privacy-policy'
+            'admissions', 'apply', 'enquiry', 'inquiry', 'support', 'privacy-policy',
+            'contact.php', 'contact-us.php', 'about.php', 'about-us.php',
+            'admission.php', 'admissions.php', 'page/contact-us', 'pages/contact',
+            'contact/index.php', 'wp/contact', 'wp/contact-us'
         )
 
         for path in paths:
@@ -488,13 +491,16 @@ class LeadCollector:
             label = link.get_text(' ', strip=True)
             if not href or href.startswith(('#', 'javascript:', 'tel:', 'mailto:')):
                 continue
-            if not wanted.search(f"{href} {label}"):
-                continue
 
             target = urljoin(current_url, href).split('#', 1)[0].rstrip('/')
             parsed = urlparse(target)
             target_host = parsed.netloc.lower().replace('www.', '')
-            if target_host and target_host != current_host:
+            is_facebook_page = target_host.endswith('facebook.com') or target_host.endswith('fb.com')
+            if is_facebook_page and any(blocked in target for blocked in ('/share', '/sharer', '/plugins')):
+                continue
+            if not wanted.search(f"{href} {label}") and not is_facebook_page:
+                continue
+            if target_host and target_host != current_host and not is_facebook_page:
                 continue
             links.append(target)
 
@@ -505,6 +511,10 @@ class LeadCollector:
         for link in soup.select('a[href^="mailto:"]'):
             values.append(unquote(link.get('href', '')))
             values.append(link.get_text(' ', strip=True))
+        for protected in soup.select('[data-cfemail]'):
+            decoded = self._decode_cloudflare_email(protected.get('data-cfemail', ''))
+            if decoded:
+                values.append(decoded)
 
         for script in soup(['script', 'style']):
             script.decompose()
@@ -517,6 +527,18 @@ class LeadCollector:
             emails.extend(self._EMAIL_PATTERN.findall(normalized))
         return emails
 
+    def _decode_cloudflare_email(self, encoded):
+        try:
+            if not encoded or len(encoded) < 4:
+                return None
+            key = int(encoded[:2], 16)
+            return ''.join(
+                chr(int(encoded[i:i + 2], 16) ^ key)
+                for i in range(2, len(encoded), 2)
+            )
+        except Exception:
+            return None
+
     def _normalize_obfuscated_email_text(self, value):
         text = unescape(value or '')
         replacements = [
@@ -524,6 +546,7 @@ class LeadCollector:
             (r'\s+at\s+', '@'),
             (r'\s*(?:\[|\()\s*dot\s*(?:\]|\))\s*', '.'),
             (r'\s+dot\s+', '.'),
+            (r'\s*(?:\[|\()\s*email\s*(?:\]|\))\s*', '@'),
             (r'\s*\[email\s+protected\]\s*', '@'),
         ]
         for pattern, replacement in replacements:
