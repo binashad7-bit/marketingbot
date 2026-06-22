@@ -47,6 +47,7 @@ class LeadCollector:
         logger.info("=" * 50)
 
         maps_count = self.collect_from_google_maps()
+        osm_count = self.collect_from_openstreetmap()
         contact_updates = self.enrich_missing_contact_info(
             limit=Config.CONTACT_ENRICH_LIMIT,
             find_email=False
@@ -63,6 +64,7 @@ class LeadCollector:
 
         result = {
             'maps_upserts': maps_count,
+            'osm_upserts': osm_count,
             'contact_updates': contact_updates,
             'email_updates': email_updates,
             'sheet_sync': sheet_sync
@@ -233,6 +235,144 @@ class LeadCollector:
     def collect_from_facebook_groups(self):
         logger.info("Facebook collection skipped: use official Meta APIs after developer access is ready")
         return 0
+
+    def collect_from_openstreetmap(self, districts=None, districts_per_run=None, results_per_district=None):
+        """Collect institute leads from free OpenStreetMap/Overpass public data."""
+        if not Config.ENABLE_OPENSTREETMAP_COLLECTION:
+            return 0
+
+        cells = self._osm_grid_cells()
+        random.shuffle(cells)
+        districts_per_run = districts_per_run or Config.OPENSTREETMAP_DISTRICTS_PER_RUN
+        results_per_district = results_per_district or Config.OPENSTREETMAP_RESULTS_PER_DISTRICT
+
+        total_upserts = 0
+        for cell in cells[:districts_per_run]:
+            try:
+                total_upserts += self._collect_openstreetmap_cell(cell, results_per_district)
+                time.sleep(random.uniform(1.0, 2.0))
+            except Exception as e:
+                logger.warning(f"OpenStreetMap collection failed for {cell['label']}: {e}")
+
+        logger.info(f"OpenStreetMap collection complete: {total_upserts} leads upserted")
+        return total_upserts
+
+    def _collect_openstreetmap_cell(self, cell, limit):
+        query = self._build_overpass_query(cell, limit)
+        response = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data={'data': query},
+            timeout=60,
+            headers={'User-Agent': 'PathshalaPro lead collection (contact: info@pathshalapro.net)'}
+        )
+        response.raise_for_status()
+        elements = response.json().get('elements') or []
+
+        upserts = 0
+        for element in elements:
+            lead = self._process_osm_element(element, cell['label'])
+            if lead:
+                upserts += 1
+        return upserts
+
+    def _osm_grid_cells(self):
+        cells = []
+        lat_min, lat_max = 20.6, 26.8
+        lon_min, lon_max = 88.0, 92.8
+        step = 0.6
+        lat = lat_min
+        row = 1
+        while lat < lat_max:
+            lon = lon_min
+            col = 1
+            while lon < lon_max:
+                cells.append({
+                    'label': f'BD-OSM-R{row:02d}C{col:02d}',
+                    'bbox': (round(lat, 2), round(lon, 2), round(min(lat + step, lat_max), 2), round(min(lon + step, lon_max), 2))
+                })
+                lon += step
+                col += 1
+            lat += step
+            row += 1
+        return cells
+
+    def _build_overpass_query(self, cell, limit):
+        south, west, north, east = cell['bbox']
+        limit = max(10, min(int(limit), 200))
+        return f"""
+[out:json][timeout:45];
+(
+  nwr["amenity"~"^(school|college|university|kindergarten|language_school|prep_school)$"]({south},{west},{north},{east});
+  nwr["office"="educational_institution"]({south},{west},{north},{east});
+  nwr["training"]({south},{west},{north},{east});
+);
+out tags center qt {limit};
+"""
+
+    def _process_osm_element(self, element, district):
+        tags = element.get('tags') or {}
+        name = (tags.get('name') or tags.get('name:en') or tags.get('official_name') or '').strip()
+        if not name or self._looks_closed(name):
+            return None
+
+        phone = self._clean_phone(
+            tags.get('contact:phone') or tags.get('phone') or tags.get('mobile') or tags.get('contact:mobile')
+        )
+        email = self._normalize_email_value(tags.get('contact:email') or tags.get('email'))
+        website = self._clean_website_url(
+            tags.get('contact:website') or tags.get('website') or tags.get('url') or tags.get('contact:facebook')
+        )
+        address = self._osm_address(tags)
+        district = tags.get('addr:district') or tags.get('addr:city') or tags.get('addr:town') or tags.get('addr:county') or district
+        if not (phone or email or website or address):
+            return None
+
+        osm_id = f"osm:{element.get('type')}:{element.get('id')}"
+        return add_lead(
+            school_name=name,
+            phone=phone,
+            email=email,
+            district=district,
+            type=self._identify_osm_type(tags),
+            source='openstreetmap',
+            website=website,
+            address=address,
+            place_id=osm_id,
+            business_status='OPERATIONAL',
+            active_status='active',
+            last_checked_at=datetime.utcnow()
+        )
+
+    def _osm_address(self, tags):
+        parts = [
+            tags.get('addr:housenumber'),
+            tags.get('addr:street'),
+            tags.get('addr:suburb'),
+            tags.get('addr:city') or tags.get('addr:town') or tags.get('addr:village'),
+            tags.get('addr:district'),
+        ]
+        return ', '.join(part.strip() for part in parts if part and str(part).strip())
+
+    def _identify_osm_type(self, tags):
+        amenity = (tags.get('amenity') or '').lower()
+        name = ' '.join(str(tags.get(key, '')) for key in ('name', 'name:en', 'official_name')).lower()
+        if 'madrasa' in name or 'madrasah' in name:
+            return 'Madrasa'
+        if amenity == 'university':
+            return 'University'
+        if amenity == 'college':
+            return 'College'
+        if amenity == 'kindergarten':
+            return 'Kindergarten'
+        if tags.get('training'):
+            return 'Training Center'
+        return 'School'
+
+    def _normalize_email_value(self, email):
+        if not email:
+            return None
+        matches = self._EMAIL_PATTERN.findall(str(email))
+        return matches[0].lower() if matches else None
 
     def collect_from_linkedin(self):
         logger.info("LinkedIn collection skipped: use official API-approved sources only")

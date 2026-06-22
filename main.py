@@ -45,6 +45,7 @@ PORT = os.getenv('PORT', 5000)
 
 LEAD_JOB_IDS = {
     'lead_generation_cycle',
+    'openstreetmap_collection',
     'enrich_contact_info',
     'find_emails',
     'clean_leads',
@@ -179,6 +180,14 @@ def init_scheduler():
             job_kwargs={'limit': Config.CONTACT_ENRICH_LIMIT, 'find_email': False},
             first_run_delay_minutes=5
         )
+        if Config.ENABLE_OPENSTREETMAP_COLLECTION:
+            add_interval_job(
+                'openstreetmap_collection',
+                'Collect leads from OpenStreetMap public data',
+                lead_collector.collect_from_openstreetmap,
+                Config.OPENSTREETMAP_INTERVAL_MINUTES,
+                first_run_delay_minutes=7
+            )
         add_interval_job(
             'find_emails',
             'Find lead emails',
@@ -249,6 +258,7 @@ def index():
             'lead_collection_dashboard': '/lead-collection/dashboard',
             'stats': '/stats',
             'scheduler_jobs': '/scheduler/jobs',
+            'openstreetmap_collection': 'POST /trigger/openstreetmap-collection',
             'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
             'enrich_contact_info': 'POST /trigger/enrich-contact-info',
             'find_emails': 'POST /trigger/find-emails'
@@ -498,6 +508,31 @@ def trigger_lead_collection():
         }), 200
     except Exception as e:
         logger.error(f"Trigger error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/trigger/openstreetmap-collection', methods=['POST'])
+@require_admin
+def trigger_openstreetmap_collection():
+    """Manually collect institute leads from OpenStreetMap public data."""
+    try:
+        payload = request.json if request.is_json else {}
+        cells_per_run = payload.get('cells_per_run', payload.get('districts_per_run', Config.OPENSTREETMAP_DISTRICTS_PER_RUN))
+        results_per_cell = payload.get('results_per_cell', payload.get('results_per_district', Config.OPENSTREETMAP_RESULTS_PER_DISTRICT))
+        result = lead_collector.collect_from_openstreetmap(
+            districts_per_run=cells_per_run,
+            results_per_district=results_per_cell
+        )
+        return jsonify({
+            'status': 'success',
+            'data': {'osm_upserts': result},
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"OpenStreetMap trigger error: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)
