@@ -103,6 +103,7 @@ def run_scheduled_job(job_id, func, *args, **kwargs):
 
 
 def add_interval_job(job_id, name, func, minutes, job_kwargs=None, first_run_delay_minutes=2):
+    first_run_at = datetime.now(scheduler.timezone) + timedelta(minutes=first_run_delay_minutes)
     scheduler.add_job(
         func=run_scheduled_job,
         args=[job_id, func],
@@ -114,7 +115,7 @@ def add_interval_job(job_id, name, func, minutes, job_kwargs=None, first_run_del
         max_instances=1,
         coalesce=True,
         misfire_grace_time=900,
-        next_run_time=datetime.now() + timedelta(minutes=first_run_delay_minutes)
+        next_run_time=first_run_at
     )
 
 
