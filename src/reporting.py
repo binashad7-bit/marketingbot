@@ -206,6 +206,10 @@ class ReportGenerator:
                     lead.website or '',
                     lead.address or '',
                     lead.source or '',
+                    lead.source_record_id or '',
+                    lead.source_confidence or '',
+                    lead.eiin or '',
+                    lead.upazila or '',
                     lead.place_id or '',
                     lead.business_status or '',
                     lead.active_status or '',
@@ -228,6 +232,11 @@ class ReportGenerator:
             db.session.commit()
             worksheet.clear()
             if rows:
+                try:
+                    if worksheet.col_count < len(rows[0]):
+                        worksheet.resize(cols=len(rows[0]))
+                except Exception as e:
+                    logger.debug(f"Could not resize lead sheet columns: {e}")
                 worksheet.update('A1', rows, value_input_option='USER_ENTERED')
                 try:
                     worksheet.freeze(rows=1)
@@ -253,13 +262,14 @@ class ReportGenerator:
         try:
             return self.spreadsheet.worksheet(title)
         except gspread.WorksheetNotFound:
-            return self.spreadsheet.add_worksheet(title=title, rows=1000, cols=32)
+            return self.spreadsheet.add_worksheet(title=title, rows=1000, cols=40)
 
     def _lead_sheet_headers(self):
         return [
             'id', 'school_name', 'type', 'district', 'phone',
             'phone_e164', 'whatsapp_url', 'phone_valid', 'phone_type',
-            'email', 'website', 'address', 'source', 'place_id', 'business_status',
+            'email', 'website', 'address', 'source', 'source_record_id',
+            'source_confidence', 'eiin', 'upazila', 'place_id', 'business_status',
             'active_status', 'rating', 'user_ratings_total', 'qualification_status',
             'contact_quality', 'duplicate_key', 'score', 'segment', 'status',
             'last_checked_at', 'last_enriched_at', 'email_checked_at',

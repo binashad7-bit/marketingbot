@@ -27,6 +27,10 @@ class Lead(db.Model):
     district = db.Column(db.String(100))
     type = db.Column(db.String(50))  # School/Coaching/Madrasa
     source = db.Column(db.String(100))  # google_maps/facebook/linkedin
+    source_record_id = db.Column(db.String(255), nullable=True, index=True)
+    source_confidence = db.Column(db.Integer, default=50)
+    eiin = db.Column(db.String(50), nullable=True, index=True)
+    upazila = db.Column(db.String(100), nullable=True, index=True)
     website = db.Column(db.String(255), nullable=True)
     place_id = db.Column(db.String(255), nullable=True, index=True)
     business_status = db.Column(db.String(50), nullable=True)
@@ -179,6 +183,20 @@ class SearchTask(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class SourceCursor(db.Model):
+    """Progress cursor for finite or grid-based public data sources."""
+    __tablename__ = 'source_cursors'
+
+    id = db.Column(db.Integer, primary_key=True)
+    source = db.Column(db.String(100), unique=True, index=True)
+    cursor = db.Column(db.Integer, default=0)
+    total_seen = db.Column(db.Integer, default=0)
+    meta = db.Column(db.Text, nullable=True)
+    last_run_at = db.Column(db.DateTime, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ডাটাবেস ফাংশনস
 
 def init_db(app):
@@ -202,6 +220,10 @@ def ensure_schema():
         'whatsapp_url': 'VARCHAR(255)',
         'phone_valid': 'BOOLEAN DEFAULT FALSE',
         'phone_type': 'VARCHAR(20)',
+        'source_record_id': 'VARCHAR(255)',
+        'source_confidence': 'INTEGER DEFAULT 50',
+        'eiin': 'VARCHAR(50)',
+        'upazila': 'VARCHAR(100)',
         'business_status': 'VARCHAR(50)',
         'active_status': "VARCHAR(30) DEFAULT 'unknown'",
         'rating': 'FLOAT',
@@ -229,6 +251,9 @@ def ensure_schema():
     index_statements = [
         'CREATE INDEX IF NOT EXISTS ix_leads_place_id ON leads (place_id)',
         'CREATE INDEX IF NOT EXISTS ix_leads_phone_e164 ON leads (phone_e164)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_source_record_id ON leads (source_record_id)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_eiin ON leads (eiin)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_upazila ON leads (upazila)',
         'CREATE INDEX IF NOT EXISTS ix_leads_phone_valid ON leads (phone_valid)',
         'CREATE INDEX IF NOT EXISTS ix_leads_active_status ON leads (active_status)',
         'CREATE INDEX IF NOT EXISTS ix_leads_canonical_key ON leads (canonical_key)',
@@ -248,7 +273,49 @@ def ensure_schema():
             db.session.rollback()
             print(f"Schema index skipped: {e}")
 
+    _backfill_lead_source_metadata(dialect)
     db.session.commit()
+
+
+def _backfill_lead_source_metadata(dialect):
+    """Fill source metadata for leads collected before these columns existed."""
+    statements = [
+        """
+        UPDATE leads
+        SET source_record_id = place_id
+        WHERE (source_record_id IS NULL OR source_record_id = '')
+          AND place_id IS NOT NULL
+          AND place_id <> ''
+        """,
+        """
+        UPDATE leads
+        SET source_confidence = CASE
+            WHEN source = 'google_maps' THEN 90
+            WHEN source = 'data_gov_bd' THEN 80
+            WHEN source = 'openstreetmap' THEN 60
+            ELSE COALESCE(source_confidence, 50)
+        END
+        WHERE source_confidence IS NULL OR source_confidence = 50
+        """
+    ]
+    if dialect == 'postgresql':
+        statements.append(
+            """
+            UPDATE leads
+            SET eiin = split_part(place_id, ':', 3)
+            WHERE source = 'data_gov_bd'
+              AND (eiin IS NULL OR eiin = '')
+              AND place_id LIKE 'data_gov_bd:contact:%'
+              AND split_part(place_id, ':', 3) ~ '^[0-9]+$'
+            """
+        )
+
+    for statement in statements:
+        try:
+            db.session.execute(text(statement))
+        except Exception as e:
+            db.session.rollback()
+            print(f"Schema backfill skipped: {e}")
 
 
 def add_lead(school_name, phone, email, district, type, source, **kwargs):
@@ -301,13 +368,17 @@ def add_lead(school_name, phone, email, district, type, source, **kwargs):
             **kwargs
         }
 
+        created = False
         if lead:
-            _merge_lead_fields(lead, fields)
+            changed = _merge_lead_fields(lead, fields)
         else:
             lead = Lead(**fields)
             db.session.add(lead)
+            created = True
+            changed = True
 
         db.session.commit()
+        lead._upsert_action = 'created' if created else ('updated' if changed else 'unchanged')
         return lead
     except Exception as e:
         db.session.rollback()
@@ -321,15 +392,19 @@ def _merge_lead_fields(lead, fields):
         'last_checked_at', 'last_enriched_at', 'email_checked_at',
         'phone_e164', 'whatsapp_url', 'phone_valid', 'phone_type',
         'qualification_status', 'contact_quality', 'duplicate_key',
-        'last_verified_at'
+        'last_verified_at', 'source_confidence'
     }
+    changed = False
     for key, value in fields.items():
         if not hasattr(lead, key) or value in (None, ''):
             continue
         current = getattr(lead, key)
-        if current in (None, '') or key in always_refresh:
+        if (current in (None, '') or key in always_refresh) and current != value:
             setattr(lead, key, value)
-    lead.updated_at = datetime.utcnow()
+            changed = True
+    if changed:
+        lead.updated_at = datetime.utcnow()
+    return changed
 
 
 def normalize_bd_phone(phone):
@@ -558,6 +633,56 @@ def can_use_api(provider, daily_limit):
     return get_api_usage_count(provider, hours=24) < daily_limit
 
 
+def get_source_cursor(source):
+    cursor = SourceCursor.query.filter_by(source=source).first()
+    if cursor:
+        return cursor
+
+    cursor = SourceCursor(source=source, cursor=0, total_seen=0)
+    db.session.add(cursor)
+    db.session.commit()
+    return cursor
+
+
+def update_source_cursor(source, cursor_position, total_seen=None, meta=None):
+    cursor = get_source_cursor(source)
+    cursor.cursor = int(cursor_position or 0)
+    if total_seen is not None:
+        cursor.total_seen = int(total_seen or 0)
+    if meta is not None:
+        cursor.meta = json.dumps(meta, default=str)
+    cursor.last_run_at = datetime.utcnow()
+    cursor.updated_at = datetime.utcnow()
+    db.session.commit()
+    return cursor
+
+
+def duplicate_group_counts():
+    """Return duplicate identity groups that should remain at zero in production."""
+    return {
+        'phone_e164': db.session.query(Lead.phone_e164, db.func.count(Lead.id))
+        .filter(Lead.phone_e164 != None, Lead.phone_e164 != '')
+        .group_by(Lead.phone_e164)
+        .having(db.func.count(Lead.id) > 1)
+        .count(),
+        'email': db.session.query(db.func.lower(Lead.email), db.func.count(Lead.id))
+        .filter(Lead.email != None, Lead.email != '')
+        .group_by(db.func.lower(Lead.email))
+        .having(db.func.count(Lead.id) > 1)
+        .count(),
+        'place_id': db.session.query(Lead.place_id, db.func.count(Lead.id))
+        .filter(Lead.place_id != None, Lead.place_id != '')
+        .group_by(Lead.place_id)
+        .having(db.func.count(Lead.id) > 1)
+        .count(),
+        'duplicate_key': db.session.query(Lead.duplicate_key, db.func.count(Lead.id))
+        .filter(Lead.duplicate_key != None, Lead.duplicate_key != '')
+        .group_by(Lead.duplicate_key)
+        .having(db.func.count(Lead.id) > 1)
+        .count()
+    }
+
+
 def ensure_search_tasks(districts, keywords):
     created = 0
     for district in districts:
@@ -713,6 +838,8 @@ def get_stats():
     closed_leads = Lead.query.filter_by(active_status='closed').count()
     qualified_leads = Lead.query.filter_by(qualification_status='qualified').count()
     whatsapp_ready = Lead.query.filter_by(phone_valid=True).count()
+    leads_with_email = Lead.query.filter(Lead.email != None, Lead.email != '').count()
+    leads_with_website = Lead.query.filter(Lead.website != None, Lead.website != '').count()
     
     return {
         'total_leads': total_leads,
@@ -720,6 +847,11 @@ def get_stats():
         'closed_leads': closed_leads,
         'qualified_leads': qualified_leads,
         'whatsapp_ready_leads': whatsapp_ready,
+        'leads_with_email': leads_with_email,
+        'leads_with_website': leads_with_website,
+        'qualified_rate': f"{(qualified_leads/total_leads*100) if total_leads > 0 else 0:.1f}%",
+        'email_rate': f"{(leads_with_email/total_leads*100) if total_leads > 0 else 0:.1f}%",
+        'website_rate': f"{(leads_with_website/total_leads*100) if total_leads > 0 else 0:.1f}%",
         'hot_leads': hot_leads,
         'warm_leads': warm_leads,
         'cold_leads': cold_leads,

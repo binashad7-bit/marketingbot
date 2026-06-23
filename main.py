@@ -13,6 +13,7 @@ from src.database import (
     Lead,
     SearchTask,
     db,
+    duplicate_group_counts,
     get_api_usage_count,
     get_recent_workflow_logs,
     get_stats,
@@ -316,12 +317,16 @@ def lead_collection_status():
         latest_lead = Lead.query.order_by(Lead.created_at.desc()).first()
         sources = {}
         districts = {}
+        contact_quality = {}
 
         for source, count in db.session.query(Lead.source, db.func.count(Lead.id)).group_by(Lead.source):
             sources[source or 'unknown'] = count
 
         for district, count in db.session.query(Lead.district, db.func.count(Lead.id)).group_by(Lead.district):
             districts[district or 'unknown'] = count
+
+        for quality, count in db.session.query(Lead.contact_quality, db.func.count(Lead.id)).group_by(Lead.contact_quality):
+            contact_quality[quality or 'unknown'] = count
 
         lead_jobs = []
         for job in scheduler.get_jobs():
@@ -332,6 +337,12 @@ def lead_collection_status():
                     'next_run_time': str(job.next_run_time) if job.next_run_time else None,
                     'trigger': str(job.trigger)
                 })
+
+        total_leads = Lead.query.count()
+        qualified_leads = Lead.query.filter(Lead.qualification_status == 'qualified').count()
+        valid_whatsapp = Lead.query.filter(Lead.phone_valid == True).count()
+        leads_with_email = Lead.query.filter(Lead.email != None, Lead.email != '').count()
+        leads_with_website = Lead.query.filter(Lead.website != None, Lead.website != '').count()
 
         return jsonify({
             'status': 'success',
@@ -354,17 +365,25 @@ def lead_collection_status():
                 'exhausted_tasks': SearchTask.query.filter(SearchTask.status == 'exhausted').count(),
                 'never_run_tasks': SearchTask.query.filter(SearchTask.last_run_at == None).count()
             },
-            'total_leads': Lead.query.count(),
+            'total_leads': total_leads,
             'active_leads': Lead.query.filter(Lead.active_status == 'active').count(),
             'closed_or_inactive_leads': Lead.query.filter(Lead.active_status == 'closed').count(),
             'unknown_active_status_leads': Lead.query.filter((Lead.active_status == None) | (Lead.active_status == 'unknown')).count(),
             'leads_with_place_id': Lead.query.filter(Lead.place_id != None, Lead.place_id != '').count(),
             'leads_with_phone': Lead.query.filter(Lead.phone != None, Lead.phone != '').count(),
-            'leads_with_valid_whatsapp_phone': Lead.query.filter(Lead.phone_valid == True).count(),
-            'leads_with_email': Lead.query.filter(Lead.email != None, Lead.email != '').count(),
-            'leads_with_website': Lead.query.filter(Lead.website != None, Lead.website != '').count(),
-            'qualified_leads': Lead.query.filter(Lead.qualification_status == 'qualified').count(),
+            'leads_with_valid_whatsapp_phone': valid_whatsapp,
+            'leads_with_email': leads_with_email,
+            'leads_with_website': leads_with_website,
+            'qualified_leads': qualified_leads,
             'unusable_no_contact_leads': Lead.query.filter(Lead.qualification_status == 'unusable').count(),
+            'data_quality': {
+                'qualified_rate': round((qualified_leads / total_leads * 100), 2) if total_leads else 0,
+                'whatsapp_ready_rate': round((valid_whatsapp / total_leads * 100), 2) if total_leads else 0,
+                'email_rate': round((leads_with_email / total_leads * 100), 2) if total_leads else 0,
+                'website_rate': round((leads_with_website / total_leads * 100), 2) if total_leads else 0,
+                'contact_quality_counts': contact_quality,
+                'duplicate_groups': duplicate_group_counts()
+            },
             'leads_last_24h': Lead.query.filter(Lead.created_at >= last_24h).count(),
             'leads_last_7d': Lead.query.filter(Lead.created_at >= last_7d).count(),
             'last_lead_at': latest_lead.created_at.isoformat() if latest_lead else None,
@@ -535,7 +554,7 @@ def trigger_public_dataset_collection():
         result = lead_collector.collect_from_public_datasets(limit=limit)
         return jsonify({
             'status': 'success',
-            'data': {'public_dataset_upserts': result},
+            'data': {'public_dataset': result},
             'timestamp': datetime.now().isoformat()
         }), 200
     except Exception as e:
@@ -560,7 +579,7 @@ def trigger_openstreetmap_collection():
         )
         return jsonify({
             'status': 'success',
-            'data': {'osm_upserts': result},
+            'data': {'openstreetmap': result},
             'timestamp': datetime.now().isoformat()
         }), 200
     except Exception as e:

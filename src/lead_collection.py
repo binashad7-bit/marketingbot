@@ -20,10 +20,12 @@ from src.database import (
     db,
     ensure_search_tasks,
     get_next_search_tasks,
+    get_source_cursor,
     mark_search_task_result,
     normalize_bd_phone,
     record_api_usage,
     refresh_lead_contact_fields,
+    update_source_cursor,
 )
 
 logger.add("logs/lead_collection.log", rotation="500 MB")
@@ -66,9 +68,9 @@ class LeadCollector:
             logger.warning(f"Lead sheet sync skipped during cycle: {e}")
 
         result = {
-            'public_dataset_upserts': public_dataset_count,
-            'maps_upserts': maps_count,
-            'osm_upserts': osm_count,
+            'public_dataset': public_dataset_count,
+            'google_maps': maps_count,
+            'openstreetmap': osm_count,
             'contact_updates': contact_updates,
             'email_updates': email_updates,
             'sheet_sync': sheet_sync
@@ -76,11 +78,47 @@ class LeadCollector:
         logger.info(f"Autonomous lead generation cycle finished: {result}")
         return result
 
+    def _source_stats(self):
+        return {
+            'processed': 0,
+            'created': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'skipped': 0
+        }
+
+    def _record_source_result(self, stats, lead):
+        if not lead:
+            stats['skipped'] += 1
+            return stats
+
+        action = getattr(lead, '_upsert_action', 'updated')
+        if action not in ('created', 'updated', 'unchanged'):
+            action = 'updated'
+        stats[action] += 1
+        return stats
+
+    def _actionable_count(self, stats):
+        if isinstance(stats, dict):
+            return int(stats.get('created', 0) or 0) + int(stats.get('updated', 0) or 0)
+        return int(stats or 0)
+
+    def _merge_stats(self, target, source):
+        for key in target:
+            target[key] += int(source.get(key, 0) or 0)
+        return target
+
     def collect_from_google_maps(self, districts=None, keywords=None, max_queries=None, results_per_query=None):
         """Collect operational institute leads from Google Places."""
+        stats = self._source_stats()
         if not self.google_maps_api_key:
             logger.error("GOOGLE_MAPS_API_KEY missing; Google Maps collection skipped")
-            return 0
+            stats['skipped'] = max_queries or 0
+            return stats
+
+        if not can_use_api('google_places', Config.GOOGLE_PLACES_DAILY_CALL_LIMIT):
+            logger.info("Google Places daily API call limit reached; collection skipped until quota resets")
+            return stats
 
         districts = districts or Config.LEAD_COLLECTION_DISTRICTS
         keywords = keywords or Config.LEAD_COLLECTION_KEYWORDS
@@ -96,20 +134,19 @@ class LeadCollector:
             random.shuffle(query_plan)
             query_plan = query_plan[:max_queries]
 
-        total_upserts = 0
         for district, keyword, task in query_plan:
             try:
-                upserts = self._collect_google_maps_query(keyword, district, results_per_query)
-                total_upserts += upserts
+                query_stats = self._collect_google_maps_query(keyword, district, results_per_query)
+                self._merge_stats(stats, query_stats)
                 if task:
-                    mark_search_task_result(task, upserts)
+                    mark_search_task_result(task, self._actionable_count(query_stats))
             except Exception as e:
                 logger.error(f"Google Maps query failed for {keyword} in {district}: {e}")
                 if task:
                     mark_search_task_result(task, 0)
 
-        logger.info(f"Google Maps collection complete: {total_upserts} leads upserted")
-        return total_upserts
+        logger.info(f"Google Maps collection complete: {stats}")
+        return stats
 
     def _collect_google_maps_query(self, keyword, district, results_per_query):
         search_query = f"{keyword} in {district}, Bangladesh"
@@ -117,7 +154,7 @@ class LeadCollector:
         params = {'query': search_query, 'key': self.google_maps_api_key}
         page_token = None
         seen_results = 0
-        upserts = 0
+        stats = self._source_stats()
 
         logger.info(f"Collecting Google Maps leads: {search_query}")
         while seen_results < results_per_query:
@@ -140,9 +177,9 @@ class LeadCollector:
                 if seen_results >= results_per_query:
                     break
                 seen_results += 1
+                stats['processed'] += 1
                 lead = self._process_google_place(place, district, keyword)
-                if lead:
-                    upserts += 1
+                self._record_source_result(stats, lead)
                 time.sleep(random.uniform(0.2, 0.6))
 
             page_token = data.get('next_page_token')
@@ -199,6 +236,8 @@ class LeadCollector:
             district=district,
             type=self._identify_type(keyword),
             source='google_maps',
+            source_record_id=place_id,
+            source_confidence=90,
             website=website,
             address=address,
             place_id=place_id,
@@ -242,20 +281,37 @@ class LeadCollector:
 
     def collect_from_public_datasets(self, limit=None):
         """Collect high-volume free leads from public Bangladesh open-data datasets."""
+        stats = self._source_stats()
         if not Config.ENABLE_PUBLIC_DATASET_COLLECTION:
-            return 0
+            return stats
 
         limit = limit or Config.PUBLIC_DATASET_BATCH_SIZE
-        total_upserts = 0
-        for row in self._fetch_data_gov_contact_rows():
-            if total_upserts >= limit:
-                break
-            lead = self._process_data_gov_contact_row(row)
-            if lead:
-                total_upserts += 1
+        rows = self._fetch_data_gov_contact_rows()
+        if not rows:
+            return stats
 
-        logger.info(f"Public dataset collection complete: {total_upserts} leads upserted")
-        return total_upserts
+        cursor = get_source_cursor('data_gov_bd_contact')
+        start = cursor.cursor % len(rows)
+        selected = rows[start:] + rows[:start]
+
+        processed = 0
+        for row in selected:
+            if processed >= limit:
+                break
+            processed += 1
+            stats['processed'] += 1
+            lead = self._process_data_gov_contact_row(row)
+            self._record_source_result(stats, lead)
+
+        next_cursor = (start + processed) % len(rows)
+        update_source_cursor(
+            'data_gov_bd_contact',
+            next_cursor,
+            total_seen=len(rows),
+            meta={'last_batch_size': processed, 'last_stats': stats}
+        )
+        logger.info(f"Public dataset collection complete: {stats}")
+        return stats
 
     def _fetch_data_gov_contact_rows(self):
         url = Config.PUBLIC_DATASET_CONTACT_URL
@@ -310,6 +366,10 @@ class LeadCollector:
             district=district,
             type=self._identify_public_dataset_type(row),
             source='data_gov_bd',
+            source_record_id=source_id,
+            source_confidence=80,
+            eiin=eiin,
+            upazila=thana,
             website=website,
             address=address,
             place_id=source_id,
@@ -335,24 +395,35 @@ class LeadCollector:
 
     def collect_from_openstreetmap(self, districts=None, districts_per_run=None, results_per_district=None):
         """Collect institute leads from free OpenStreetMap/Overpass public data."""
+        stats = self._source_stats()
         if not Config.ENABLE_OPENSTREETMAP_COLLECTION:
-            return 0
+            return stats
 
         cells = self._osm_grid_cells()
-        random.shuffle(cells)
         districts_per_run = districts_per_run or Config.OPENSTREETMAP_DISTRICTS_PER_RUN
         results_per_district = results_per_district or Config.OPENSTREETMAP_RESULTS_PER_DISTRICT
+        cursor = get_source_cursor('openstreetmap_grid')
+        start = cursor.cursor % len(cells)
+        selected_cells = (cells[start:] + cells[:start])[:districts_per_run]
 
-        total_upserts = 0
-        for cell in cells[:districts_per_run]:
+        processed_cells = 0
+        for cell in selected_cells:
             try:
-                total_upserts += self._collect_openstreetmap_cell(cell, results_per_district)
+                cell_stats = self._collect_openstreetmap_cell(cell, results_per_district)
+                self._merge_stats(stats, cell_stats)
+                processed_cells += 1
                 time.sleep(random.uniform(1.0, 2.0))
             except Exception as e:
                 logger.warning(f"OpenStreetMap collection failed for {cell['label']}: {e}")
 
-        logger.info(f"OpenStreetMap collection complete: {total_upserts} leads upserted")
-        return total_upserts
+        update_source_cursor(
+            'openstreetmap_grid',
+            (start + processed_cells) % len(cells),
+            total_seen=len(cells),
+            meta={'last_cells': [cell['label'] for cell in selected_cells], 'last_stats': stats}
+        )
+        logger.info(f"OpenStreetMap collection complete: {stats}")
+        return stats
 
     def _collect_openstreetmap_cell(self, cell, limit):
         query = self._build_overpass_query(cell, limit)
@@ -365,12 +436,12 @@ class LeadCollector:
         response.raise_for_status()
         elements = response.json().get('elements') or []
 
-        upserts = 0
+        stats = self._source_stats()
         for element in elements:
+            stats['processed'] += 1
             lead = self._process_osm_element(element, cell['label'])
-            if lead:
-                upserts += 1
-        return upserts
+            self._record_source_result(stats, lead)
+        return stats
 
     def _osm_grid_cells(self):
         cells = []
@@ -411,6 +482,8 @@ out tags center qt {limit};
         name = (tags.get('name') or tags.get('name:en') or tags.get('official_name') or '').strip()
         if not name or self._looks_closed(name):
             return None
+        if not self._osm_tags_look_bangladesh(tags):
+            return None
 
         phone = self._clean_phone(
             tags.get('contact:phone') or tags.get('phone') or tags.get('mobile') or tags.get('contact:mobile')
@@ -432,6 +505,9 @@ out tags center qt {limit};
             district=district,
             type=self._identify_osm_type(tags),
             source='openstreetmap',
+            source_record_id=osm_id,
+            source_confidence=60,
+            upazila=tags.get('addr:subdistrict') or tags.get('addr:upazila'),
             website=website,
             address=address,
             place_id=osm_id,
@@ -439,6 +515,23 @@ out tags center qt {limit};
             active_status='active',
             last_checked_at=datetime.utcnow()
         )
+
+    def _osm_tags_look_bangladesh(self, tags):
+        country = (tags.get('addr:country') or tags.get('is_in:country') or '').strip().lower()
+        if country and country not in {'bd', 'bangladesh'}:
+            return False
+
+        location_text = ' '.join(
+            str(tags.get(key, ''))
+            for key in (
+                'addr:state', 'addr:province', 'addr:district', 'addr:city',
+                'addr:town', 'addr:county', 'is_in', 'is_in:state'
+            )
+        ).lower()
+        blocked_border_regions = (
+            'assam', 'tripura', 'meghalaya', 'mizoram', 'west bengal', 'india'
+        )
+        return not any(region in location_text for region in blocked_border_regions)
 
     def _osm_address(self, tags):
         parts = [
@@ -477,6 +570,21 @@ out tags center qt {limit};
 
     def enrich_missing_contact_info(self, limit=500, find_email=False, commit_every=25):
         """Refresh Google details for leads missing phone, website, status, or place_id."""
+        stats = {
+            'checked': 0,
+            'updated': 0,
+            'skipped': 0,
+            'quota_available': True
+        }
+        if not self.google_maps_api_key:
+            logger.info("Contact enrichment skipped: GOOGLE_MAPS_API_KEY missing")
+            stats['quota_available'] = False
+            return stats
+        if not can_use_api('google_places', Config.GOOGLE_PLACES_DAILY_CALL_LIMIT):
+            logger.info("Contact enrichment skipped: Google Places daily API call limit reached")
+            stats['quota_available'] = False
+            return stats
+
         cutoff = datetime.utcnow() - timedelta(days=7)
         leads = Lead.query.filter(
             Lead.source == 'google_maps',
@@ -493,12 +601,18 @@ out tags center qt {limit};
             )
         ).limit(limit).all()
 
-        updated = 0
         for lead in leads:
             try:
+                stats['checked'] += 1
+                if not can_use_api('google_places', Config.GOOGLE_PLACES_DAILY_CALL_LIMIT):
+                    logger.info("Contact enrichment paused: Google Places quota exhausted mid-run")
+                    stats['quota_available'] = False
+                    stats['skipped'] += len(leads) - stats['checked'] + 1
+                    break
                 details = self._lookup_place_details(lead.school_name, lead.district, lead.place_id)
                 lead.last_enriched_at = datetime.utcnow()
                 if not details:
+                    stats['skipped'] += 1
                     continue
 
                 changed = self._apply_place_details_to_lead(lead, details)
@@ -507,21 +621,23 @@ out tags center qt {limit};
                     lead.email_checked_at = datetime.utcnow()
                     if email and not self._email_used_by_other_lead(email, lead.id):
                         lead.email = email.lower()
+                        refresh_lead_contact_fields(lead)
                         changed = True
 
                 if changed:
-                    updated += 1
-                if updated and updated % commit_every == 0:
+                    stats['updated'] += 1
+                if stats['checked'] and stats['checked'] % commit_every == 0:
                     db.session.commit()
 
                 time.sleep(random.uniform(0.2, 0.7))
             except Exception as e:
                 db.session.rollback()
+                stats['skipped'] += 1
                 logger.warning(f"Contact enrichment failed for {lead.school_name}: {e}")
 
         db.session.commit()
-        logger.info(f"Contact enrichment updated {updated} leads")
-        return updated
+        logger.info(f"Contact enrichment complete: {stats}")
+        return stats
 
     def _lookup_place_details(self, school_name, district=None, place_id=None):
         if place_id:
@@ -881,6 +997,13 @@ out tags center qt {limit};
 
     def enrich_missing_emails(self, limit=50, commit_every=10, force=False):
         """Enrich a small quota-aware batch of active leads with websites."""
+        stats = {
+            'checked': 0,
+            'updated': 0,
+            'skipped_no_website': 0,
+            'hunter_searches': 0,
+            'force': force
+        }
         cutoff = datetime.utcnow() - timedelta(days=14)
         filters = [
             or_(Lead.email == None, Lead.email == ''),
@@ -893,29 +1016,25 @@ out tags center qt {limit};
 
         leads = Lead.query.filter(*filters).order_by(Lead.email_checked_at.asc().nullsfirst()).limit(limit).all()
 
-        updated = 0
-        checked = 0
         hunter_searches = 0
         for lead in leads:
             allow_hunter = hunter_searches < Config.HUNTER_SEARCHES_PER_RUN
             email, hunter_used = self._find_email_candidate(lead.website, lead.school_name, allow_hunter=allow_hunter)
             if hunter_used:
                 hunter_searches += 1
+                stats['hunter_searches'] = hunter_searches
             lead.email_checked_at = datetime.utcnow()
-            checked += 1
+            stats['checked'] += 1
             if email and not self._email_used_by_other_lead(email, lead.id):
                 lead.email = email.lower()
                 refresh_lead_contact_fields(lead)
-                updated += 1
-            if checked % commit_every == 0:
+                stats['updated'] += 1
+            if stats['checked'] % commit_every == 0:
                 db.session.commit()
 
         db.session.commit()
-        logger.info(
-            f"Email enrichment checked {checked}, updated {updated} leads, "
-            f"hunter_searches={hunter_searches}, force={force}"
-        )
-        return updated
+        logger.info(f"Email enrichment complete: {stats}")
+        return stats
 
     def clean_and_score_leads(self):
         """Deduplicate, mark inactive leads, and score usable records."""
