@@ -122,6 +122,7 @@ class Config:
             'https://overpass.kumi.systems/api/interpreter'
         ]
     )
+    OVERPASS_TIMEOUT_SECONDS = int(os.getenv('OVERPASS_TIMEOUT_SECONDS', 20))
     ENABLE_PUBLIC_DATASET_COLLECTION = os.getenv('ENABLE_PUBLIC_DATASET_COLLECTION', 'true').lower() == 'true'
     PUBLIC_DATASET_BATCH_SIZE = int(os.getenv('PUBLIC_DATASET_BATCH_SIZE', 1000))
     PUBLIC_DATASET_INTERVAL_MINUTES = int(os.getenv('PUBLIC_DATASET_INTERVAL_MINUTES', 180))

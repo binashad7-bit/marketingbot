@@ -446,7 +446,7 @@ class LeadCollector:
                 response = requests.post(
                     endpoint,
                     data={'data': query},
-                    timeout=60,
+                    timeout=Config.OVERPASS_TIMEOUT_SECONDS,
                     headers={'User-Agent': 'PathshalaPro lead collection (contact: info@pathshalapro.net)'}
                 )
                 response.raise_for_status()
