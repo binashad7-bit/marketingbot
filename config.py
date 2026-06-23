@@ -115,6 +115,13 @@ class Config:
     OPENSTREETMAP_DISTRICTS_PER_RUN = int(os.getenv('OPENSTREETMAP_DISTRICTS_PER_RUN', 6))
     OPENSTREETMAP_RESULTS_PER_DISTRICT = int(os.getenv('OPENSTREETMAP_RESULTS_PER_DISTRICT', 80))
     OPENSTREETMAP_INTERVAL_MINUTES = int(os.getenv('OPENSTREETMAP_INTERVAL_MINUTES', 360))
+    OVERPASS_API_URLS = _csv_list_env(
+        'OVERPASS_API_URLS',
+        [
+            'https://overpass-api.de/api/interpreter',
+            'https://overpass.kumi.systems/api/interpreter'
+        ]
+    )
     ENABLE_PUBLIC_DATASET_COLLECTION = os.getenv('ENABLE_PUBLIC_DATASET_COLLECTION', 'true').lower() == 'true'
     PUBLIC_DATASET_BATCH_SIZE = int(os.getenv('PUBLIC_DATASET_BATCH_SIZE', 1000))
     PUBLIC_DATASET_INTERVAL_MINUTES = int(os.getenv('PUBLIC_DATASET_INTERVAL_MINUTES', 180))

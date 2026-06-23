@@ -427,14 +427,7 @@ class LeadCollector:
 
     def _collect_openstreetmap_cell(self, cell, limit):
         query = self._build_overpass_query(cell, limit)
-        response = requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data={'data': query},
-            timeout=60,
-            headers={'User-Agent': 'PathshalaPro lead collection (contact: info@pathshalapro.net)'}
-        )
-        response.raise_for_status()
-        elements = response.json().get('elements') or []
+        elements = self._fetch_overpass_elements(query, cell['label'])
 
         stats = self._source_stats()
         for element in elements:
@@ -442,6 +435,30 @@ class LeadCollector:
             lead = self._process_osm_element(element, cell['label'])
             self._record_source_result(stats, lead)
         return stats
+
+    def _fetch_overpass_elements(self, query, cell_label):
+        endpoints = list(Config.OVERPASS_API_URLS or [])
+        random.shuffle(endpoints)
+        last_error = None
+
+        for endpoint in endpoints:
+            try:
+                response = requests.post(
+                    endpoint,
+                    data={'data': query},
+                    timeout=60,
+                    headers={'User-Agent': 'PathshalaPro lead collection (contact: info@pathshalapro.net)'}
+                )
+                response.raise_for_status()
+                return response.json().get('elements') or []
+            except requests.RequestException as e:
+                last_error = e
+                logger.warning(f"OpenStreetMap endpoint failed for {cell_label}: {endpoint}: {e}")
+                time.sleep(random.uniform(1.0, 2.0))
+
+        if last_error:
+            raise last_error
+        return []
 
     def _osm_grid_cells(self):
         cells = []
