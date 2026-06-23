@@ -1,3 +1,5 @@
+import csv
+import io
 import random
 import re
 import time
@@ -46,6 +48,7 @@ class LeadCollector:
         logger.info("Autonomous lead generation cycle started")
         logger.info("=" * 50)
 
+        public_dataset_count = self.collect_from_public_datasets()
         maps_count = self.collect_from_google_maps()
         osm_count = self.collect_from_openstreetmap()
         contact_updates = self.enrich_missing_contact_info(
@@ -63,6 +66,7 @@ class LeadCollector:
             logger.warning(f"Lead sheet sync skipped during cycle: {e}")
 
         result = {
+            'public_dataset_upserts': public_dataset_count,
             'maps_upserts': maps_count,
             'osm_upserts': osm_count,
             'contact_updates': contact_updates,
@@ -235,6 +239,99 @@ class LeadCollector:
     def collect_from_facebook_groups(self):
         logger.info("Facebook collection skipped: use official Meta APIs after developer access is ready")
         return 0
+
+    def collect_from_public_datasets(self, limit=None):
+        """Collect high-volume free leads from public Bangladesh open-data datasets."""
+        if not Config.ENABLE_PUBLIC_DATASET_COLLECTION:
+            return 0
+
+        limit = limit or Config.PUBLIC_DATASET_BATCH_SIZE
+        total_upserts = 0
+        for row in self._fetch_data_gov_contact_rows():
+            if total_upserts >= limit:
+                break
+            lead = self._process_data_gov_contact_row(row)
+            if lead:
+                total_upserts += 1
+
+        logger.info(f"Public dataset collection complete: {total_upserts} leads upserted")
+        return total_upserts
+
+    def _fetch_data_gov_contact_rows(self):
+        url = Config.PUBLIC_DATASET_CONTACT_URL
+        try:
+            response = requests.get(
+                url,
+                timeout=60,
+                headers={'User-Agent': 'PathshalaPro lead collection (contact: info@pathshalapro.net)'}
+            )
+            response.raise_for_status()
+        except Exception as e:
+            logger.warning(f"Public dataset download failed: {url}: {e}")
+            return []
+
+        text = response.content.decode('utf-8-sig', errors='replace')
+        header_index = text.upper().find('DIVISION_NAME,')
+        if header_index > 0:
+            text = text[header_index:]
+        if 'INSTITUTE_NAME' not in text[:500].upper():
+            logger.warning("Public dataset skipped: CSV header not found")
+            return []
+
+        try:
+            return list(csv.DictReader(io.StringIO(text)))
+        except Exception as e:
+            logger.warning(f"Public dataset CSV parse failed: {e}")
+            return []
+
+    def _process_data_gov_contact_row(self, row):
+        name = (row.get('INSTITUTE_NAME_NEW') or row.get('INSTITUTE_NAME') or '').strip()
+        if not name or self._looks_closed(name):
+            return None
+
+        phone = self._clean_phone(row.get('MOBPHONE') or row.get('MOBILE') or row.get('PHONE'))
+        email = self._normalize_email_value(row.get('EMAIL') or row.get('MAIL'))
+        website = self._clean_website_url(row.get('WEBSITE') or row.get('URL') or '')
+        if not (phone or email or website):
+            return None
+
+        district = (row.get('DISTRICT_NAME') or row.get('DISTRICT') or '').strip().title() or 'Bangladesh'
+        thana = (row.get('THANA_NAME') or row.get('THANA') or row.get('UPAZILA') or '').strip().title()
+        post_office = (row.get('POST_OFFICE') or '').strip().title()
+        location = (row.get('LOCATION') or '').strip().title()
+        address = ', '.join(part for part in (location, post_office, thana, district) if part)
+        eiin = str(row.get('EIIN') or '').strip()
+        source_id = f"data_gov_bd:contact:{eiin or self._slugify(name)}"
+
+        return add_lead(
+            school_name=name.title(),
+            phone=phone,
+            email=email,
+            district=district,
+            type=self._identify_public_dataset_type(row),
+            source='data_gov_bd',
+            website=website,
+            address=address,
+            place_id=source_id,
+            business_status='OPERATIONAL',
+            active_status='active',
+            last_checked_at=datetime.utcnow()
+        )
+
+    def _identify_public_dataset_type(self, row):
+        text = ' '.join(str(row.get(key, '')) for key in ('TYP', 'LVL', 'INSTITUTE_NAME_NEW', 'INSTITUTE_NAME')).lower()
+        if 'madrasa' in text or 'madrasah' in text:
+            return 'Madrasa'
+        if 'college' in text:
+            return 'College'
+        if 'kindergarten' in text or 'kg' in text:
+            return 'Kindergarten'
+        if 'technical' in text or 'vocational' in text:
+            return 'Technical Institute'
+        return 'School'
+
+    def _slugify(self, value):
+        return re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')[:120]
 
     def collect_from_openstreetmap(self, districts=None, districts_per_run=None, results_per_district=None):
         """Collect institute leads from free OpenStreetMap/Overpass public data."""

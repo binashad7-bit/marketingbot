@@ -45,6 +45,7 @@ PORT = os.getenv('PORT', 5000)
 
 LEAD_JOB_IDS = {
     'lead_generation_cycle',
+    'public_dataset_collection',
     'openstreetmap_collection',
     'enrich_contact_info',
     'find_emails',
@@ -180,6 +181,15 @@ def init_scheduler():
             job_kwargs={'limit': Config.CONTACT_ENRICH_LIMIT, 'find_email': False},
             first_run_delay_minutes=5
         )
+        if Config.ENABLE_PUBLIC_DATASET_COLLECTION:
+            add_interval_job(
+                'public_dataset_collection',
+                'Collect leads from public open-data contact datasets',
+                lead_collector.collect_from_public_datasets,
+                Config.PUBLIC_DATASET_INTERVAL_MINUTES,
+                job_kwargs={'limit': Config.PUBLIC_DATASET_BATCH_SIZE},
+                first_run_delay_minutes=6
+            )
         if Config.ENABLE_OPENSTREETMAP_COLLECTION:
             add_interval_job(
                 'openstreetmap_collection',
@@ -258,6 +268,7 @@ def index():
             'lead_collection_dashboard': '/lead-collection/dashboard',
             'stats': '/stats',
             'scheduler_jobs': '/scheduler/jobs',
+            'public_dataset_collection': 'POST /trigger/public-dataset-collection',
             'openstreetmap_collection': 'POST /trigger/openstreetmap-collection',
             'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
             'enrich_contact_info': 'POST /trigger/enrich-contact-info',
@@ -508,6 +519,27 @@ def trigger_lead_collection():
         }), 200
     except Exception as e:
         logger.error(f"Trigger error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/trigger/public-dataset-collection', methods=['POST'])
+@require_admin
+def trigger_public_dataset_collection():
+    """Manually collect leads from public open-data contact datasets."""
+    try:
+        payload = request.json if request.is_json else {}
+        limit = payload.get('limit', Config.PUBLIC_DATASET_BATCH_SIZE)
+        result = lead_collector.collect_from_public_datasets(limit=limit)
+        return jsonify({
+            'status': 'success',
+            'data': {'public_dataset_upserts': result},
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Public dataset trigger error: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)
