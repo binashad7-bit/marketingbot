@@ -114,6 +114,7 @@ class LeadCollector:
         self.hunter_api_key = Config.HUNTER_API_KEY
         self.google_places_available = True
         self.usa_collection_lock = threading.Lock()
+        self.email_enrichment_lock = threading.Lock()
 
     def run_autonomous_cycle(self):
         """Run one safe, repeatable lead-only cycle."""
@@ -1066,17 +1067,21 @@ out tags center qt {limit};
         candidates = self._build_email_candidate_urls(website)
         checked = set()
         found_emails = []
+        deadline = time.monotonic() + Config.WEBSITE_EMAIL_MAX_SECONDS_PER_SITE
 
         for url in candidates:
             if url in checked or len(checked) >= Config.WEBSITE_EMAIL_MAX_PAGES:
                 continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             checked.add(url)
             try:
                 response = requests.get(
                     url,
-                    timeout=8,
+                    timeout=max(1, min(Config.WEBSITE_EMAIL_TIMEOUT_SECONDS, remaining)),
                     allow_redirects=True,
-                    headers={'User-Agent': 'Mozilla/5.0 (compatible; PathshalaPro lead email enrichment)'}
+                    headers=self._website_headers()
                 )
                 if response.status_code >= 400:
                     continue
@@ -1085,12 +1090,19 @@ out tags center qt {limit};
                     continue
 
                 soup = BeautifulSoup(response.text, 'html.parser')
-                found_emails.extend(self._extract_emails_from_html(response.text, soup))
+                page_emails = self._extract_emails_from_html(response.text, soup)
+                found_emails.extend(page_emails)
+                if url == candidates[0] and not found_emails and len(checked) < Config.WEBSITE_EMAIL_MAX_PAGES:
+                    for sitemap_url in self._discover_sitemap_candidate_urls(response.url, soup, deadline):
+                        if sitemap_url not in checked and sitemap_url not in candidates:
+                            candidates.append(sitemap_url)
 
                 if len(checked) < Config.WEBSITE_EMAIL_MAX_PAGES:
                     for link in self._discover_email_candidate_links(url, soup):
                         if link not in checked and link not in candidates:
                             candidates.append(link)
+                if found_emails and len(checked) >= 3:
+                    break
             except Exception as e:
                 logger.debug(f"Website email lookup failed for {url}: {e}")
 
@@ -1101,11 +1113,15 @@ out tags center qt {limit};
         parsed = urlparse(base)
         urls = [base]
         paths = (
-            'contact', 'contact-us', 'contacts', 'about', 'about-us', 'admission',
-            'admissions', 'apply', 'enquiry', 'inquiry', 'support', 'privacy-policy',
+            'contact', 'contact-us', 'contactus', 'contacts', 'about', 'about-us',
+            'team', 'staff', 'our-team', 'locations', 'location', 'appointments',
+            'booking', 'book-now', 'services', 'customer-service', 'support',
+            'privacy', 'privacy-policy', 'admission', 'admissions', 'apply',
+            'enquiry', 'inquiry',
             'contact.php', 'contact-us.php', 'about.php', 'about-us.php',
             'admission.php', 'admissions.php', 'page/contact-us', 'pages/contact',
-            'contact/index.php', 'wp/contact', 'wp/contact-us'
+            'contact/index.php', 'wp/contact', 'wp/contact-us',
+            'sitemap.xml', 'sitemap_index.xml', 'wp-sitemap.xml'
         )
 
         for path in paths:
@@ -1148,17 +1164,95 @@ out tags center qt {limit};
                 continue
             links.append(target)
 
-        return list(dict.fromkeys(links))[:8]
+        return list(dict.fromkeys(links))[:Config.WEBSITE_EMAIL_MAX_LINKS_PER_SITE]
+
+    def _discover_sitemap_candidate_urls(self, base_url, soup, deadline=None):
+        urls = []
+        parsed = urlparse(base_url)
+        root = f"{parsed.scheme}://{parsed.netloc}"
+        for link in soup.select('link[rel="sitemap"], a[href*="sitemap"]'):
+            href = link.get('href', '')
+            if href:
+                urls.append(urljoin(base_url, href))
+
+        robots_url = f"{root}/robots.txt"
+        try:
+            remaining = (deadline - time.monotonic()) if deadline else Config.WEBSITE_EMAIL_TIMEOUT_SECONDS
+            if remaining <= 0:
+                return []
+            response = requests.get(
+                robots_url,
+                timeout=max(1, min(Config.WEBSITE_EMAIL_TIMEOUT_SECONDS, remaining)),
+                headers=self._website_headers(),
+            )
+            if response.status_code < 400:
+                for line in response.text.splitlines():
+                    if line.lower().startswith('sitemap:'):
+                        urls.append(line.split(':', 1)[1].strip())
+        except Exception as e:
+            logger.debug(f"Robots sitemap lookup failed for {robots_url}: {e}")
+
+        urls.extend([
+            f"{root}/sitemap.xml",
+            f"{root}/sitemap_index.xml",
+            f"{root}/wp-sitemap.xml",
+        ])
+
+        wanted = re.compile(
+            r'(contact|about|team|staff|location|appointment|booking|support|privacy|service)',
+            re.IGNORECASE
+        )
+        page_urls = []
+        for sitemap_url in list(dict.fromkeys(urls))[:5]:
+            try:
+                remaining = (deadline - time.monotonic()) if deadline else Config.WEBSITE_EMAIL_TIMEOUT_SECONDS
+                if remaining <= 0:
+                    break
+                response = requests.get(
+                    sitemap_url,
+                    timeout=max(1, min(Config.WEBSITE_EMAIL_TIMEOUT_SECONDS, remaining)),
+                    headers=self._website_headers(),
+                )
+                if response.status_code >= 400:
+                    continue
+                for match in re.findall(r'<loc>\s*([^<]+)\s*</loc>', response.text, re.IGNORECASE):
+                    match = unescape(match.strip())
+                    if wanted.search(match):
+                        page_urls.append(match)
+                if page_urls:
+                    break
+            except Exception as e:
+                logger.debug(f"Sitemap email lookup failed for {sitemap_url}: {e}")
+
+        return list(dict.fromkeys(page_urls))[:Config.WEBSITE_EMAIL_MAX_LINKS_PER_SITE]
 
     def _extract_emails_from_html(self, html, soup):
         values = []
-        for link in soup.select('a[href^="mailto:"]'):
-            values.append(unquote(link.get('href', '')))
+        for link in soup.select('a[href]'):
+            href = link.get('href', '')
+            if href.lower().startswith('mailto:'):
+                values.append(unquote(href.split('?', 1)[0].replace('mailto:', '', 1)))
+            elif '@' in href or '%40' in href.lower():
+                values.append(unquote(href))
             values.append(link.get_text(' ', strip=True))
+
+        for element in soup.select('[content], [data-email], [data-mail], [data-user], [data-domain], [aria-label], [title]'):
+            for attr in ('content', 'data-email', 'data-mail', 'aria-label', 'title'):
+                value = element.get(attr)
+                if value:
+                    values.append(value)
+            user = element.get('data-user')
+            domain = element.get('data-domain') or element.get('data-host')
+            if user and domain:
+                values.append(f"{user}@{domain}")
+
         for protected in soup.select('[data-cfemail]'):
             decoded = self._decode_cloudflare_email(protected.get('data-cfemail', ''))
             if decoded:
                 values.append(decoded)
+
+        for script in soup.select('script[type="application/ld+json"]'):
+            values.append(script.get_text(' ', strip=True))
 
         for script in soup(['script', 'style']):
             script.decompose()
@@ -1184,12 +1278,14 @@ out tags center qt {limit};
             return None
 
     def _normalize_obfuscated_email_text(self, value):
-        text = unescape(value or '')
+        text = unquote(unescape(value or ''))
+        text = re.sub(r'\\u0040|&#64;|&commat;', '@', text, flags=re.IGNORECASE)
+        text = re.sub(r'\\u002e|&#46;', '.', text, flags=re.IGNORECASE)
         replacements = [
-            (r'\s*(?:\[|\()\s*at\s*(?:\]|\))\s*', '@'),
-            (r'\s+at\s+', '@'),
-            (r'\s*(?:\[|\()\s*dot\s*(?:\]|\))\s*', '.'),
-            (r'\s+dot\s+', '.'),
+            (r'\s*(?:\[|\(|\{)\s*at\s*(?:\]|\)|\})\s*', '@'),
+            (r'\s+at\s+(?=[a-z0-9.-]+\s*(?:\.|dot|\[dot\]|\(dot\)))', '@'),
+            (r'\s*(?:\[|\(|\{)\s*dot\s*(?:\]|\)|\})\s*', '.'),
+            (r'\s+dot\s+(?=[a-z]{2,})', '.'),
             (r'\s*(?:\[|\()\s*email\s*(?:\]|\))\s*', '@'),
             (r'\s*\[email\s+protected\]\s*', '@'),
         ]
@@ -1203,12 +1299,19 @@ out tags center qt {limit};
         clean_emails = []
         blocked_domains = {
             'example.com', 'domain.com', 'email.com', 'sentry.io', 'wixpress.com',
-            'facebook.com', 'facebookmail.com'
+            'facebook.com', 'facebookmail.com', 'instagram.com', 'schema.org',
+            'w3.org', 'google.com', 'googletagmanager.com', 'google-analytics.com',
+            'cloudflare.com', 'wordpress.com', 'shopify.com', 'squarespace.com',
+            'godaddy.com', 'mailchimp.com', 'constantcontact.com', 'yelp.com'
         }
-        blocked_prefixes = ('noreply', 'no-reply', 'donotreply', 'example', 'test')
+        blocked_prefixes = (
+            'noreply', 'no-reply', 'donotreply', 'example', 'test',
+            'abuse', 'postmaster', 'webmaster'
+        )
         preferred_prefixes = (
             'info', 'contact', 'admin', 'admission', 'admissions', 'support',
-            'principal', 'office', 'hello', 'mail'
+            'principal', 'office', 'hello', 'mail', 'sales', 'service',
+            'appointments', 'booking', 'frontdesk', 'manager'
         )
         website_domain = urlparse(website).netloc.lower().replace('www.', '')
 
@@ -1220,6 +1323,8 @@ out tags center qt {limit};
                 continue
             local, domain = email.rsplit('@', 1)
             if domain in blocked_domains or any(local.startswith(prefix) for prefix in blocked_prefixes):
+                continue
+            if domain.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.css', '.js')):
                 continue
             if len(local) > 64 or len(email) > 254:
                 continue
@@ -1237,8 +1342,10 @@ out tags center qt {limit};
                 value += 20
             if local in preferred_prefixes:
                 value += 25
-            if any(word in local for word in ('admission', 'info', 'contact', 'office')):
+            if any(word in local for word in ('admission', 'info', 'contact', 'office', 'hello', 'service')):
                 value += 10
+            if any(word in local for word in ('privacy', 'legal')):
+                value -= 10
             if school_name:
                 normalized_name = re.sub(r'[^a-z0-9]+', '', school_name.lower())
                 if normalized_name and normalized_name[:8] in re.sub(r'[^a-z0-9]+', '', email):
@@ -1246,6 +1353,12 @@ out tags center qt {limit};
             return value
 
         return sorted(set(clean_emails), key=lambda email: (-score(email), email))[0]
+
+    def _website_headers(self):
+        return {
+            'User-Agent': 'Mozilla/5.0 (compatible; PathshalaPro prospect enrichment; +https://pathshalapro.net)',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5',
+        }
 
     def _email_used_by_other_lead(self, email, lead_id):
         if not email:
@@ -1264,8 +1377,8 @@ out tags center qt {limit};
             try:
                 response = requests.get(
                     url,
-                    timeout=3,
-                    headers={'User-Agent': 'Mozilla/5.0 PathshalaPro lead phone enrichment'}
+                    timeout=Config.WEBSITE_EMAIL_TIMEOUT_SECONDS,
+                    headers=self._website_headers()
                 )
                 if response.status_code >= 400:
                     continue
@@ -1291,9 +1404,9 @@ out tags center qt {limit};
         try:
             response = requests.get(
                 website,
-                timeout=8,
+                timeout=Config.WEBSITE_EMAIL_TIMEOUT_SECONDS,
                 allow_redirects=True,
-                headers={'User-Agent': 'Mozilla/5.0 (compatible; PathshalaPro prospect enrichment)'},
+                headers=self._website_headers(),
             )
             if response.status_code >= 400:
                 return profiles
@@ -1317,60 +1430,84 @@ out tags center qt {limit};
         stats = {
             'checked': 0,
             'updated': 0,
+            'emails_found': 0,
+            'duplicate_emails_skipped': 0,
+            'no_email_found': 0,
             'phones_updated': 0,
             'social_profiles_updated': 0,
             'skipped_no_website': 0,
             'hunter_searches': 0,
             'force': force
         }
+        if not self.email_enrichment_lock.acquire(blocking=False):
+            logger.info("Email enrichment skipped: another run is already active")
+            stats['busy'] = True
+            return stats
+
         cutoff = datetime.utcnow() - timedelta(days=14)
-        filters = [
-            or_(Lead.email == None, Lead.email == ''),
-            Lead.website != None,
-            Lead.website != '',
-            or_(Lead.active_status == None, Lead.active_status != 'closed'),
-        ]
-        if not force:
-            filters.append(or_(Lead.email_checked_at == None, Lead.email_checked_at < cutoff))
+        try:
+            filters = [
+                or_(Lead.email == None, Lead.email == ''),
+                Lead.website != None,
+                Lead.website != '',
+                or_(Lead.active_status == None, Lead.active_status != 'closed'),
+            ]
+            if not force:
+                filters.append(or_(Lead.email_checked_at == None, Lead.email_checked_at < cutoff))
 
-        leads = Lead.query.filter(*filters).order_by(Lead.email_checked_at.asc().nullsfirst()).limit(limit).all()
+            market_priority = db.case((Lead.market == 'usa_local_business', 0), else_=1)
+            leads = Lead.query.filter(*filters).order_by(
+                market_priority,
+                Lead.email_checked_at.asc().nullsfirst(),
+                Lead.updated_at.desc()
+            ).limit(limit).all()
 
-        hunter_searches = 0
-        for lead in leads:
-            allow_hunter = hunter_searches < Config.HUNTER_SEARCHES_PER_RUN
-            email, hunter_used = self._find_email_candidate(lead.website, lead.school_name, allow_hunter=allow_hunter)
-            if hunter_used:
-                hunter_searches += 1
-                stats['hunter_searches'] = hunter_searches
-            lead.email_checked_at = datetime.utcnow()
-            stats['checked'] += 1
-            changed = False
-            if email and not self._email_used_by_other_lead(email, lead.id):
-                lead.email = email.lower()
-                changed = True
-            if lead.market == 'usa_local_business':
-                if not lead.phone_valid:
-                    phone = self._find_phone_from_website(lead.website, lead.country_code or 'US')
-                    if phone:
-                        lead.phone = phone
-                        stats['phones_updated'] += 1
+            hunter_searches = 0
+            for lead in leads:
+                allow_hunter = hunter_searches < Config.HUNTER_SEARCHES_PER_RUN
+                email, hunter_used = self._find_email_candidate(
+                    lead.website, lead.school_name, allow_hunter=allow_hunter
+                )
+                if hunter_used:
+                    hunter_searches += 1
+                    stats['hunter_searches'] = hunter_searches
+                lead.email_checked_at = datetime.utcnow()
+                stats['checked'] += 1
+                changed = False
+                if email:
+                    if not self._email_used_by_other_lead(email, lead.id):
+                        lead.email = email.lower()
+                        stats['emails_found'] += 1
                         changed = True
-                if not lead.facebook_url or not lead.instagram_url:
-                    profiles = self._find_social_profiles_from_website(lead.website)
-                    for field, value in profiles.items():
-                        if value and not getattr(lead, field):
-                            setattr(lead, field, value)
-                            stats['social_profiles_updated'] += 1
+                    else:
+                        stats['duplicate_emails_skipped'] += 1
+                else:
+                    stats['no_email_found'] += 1
+                if lead.market == 'usa_local_business':
+                    if not lead.phone_valid:
+                        phone = self._find_phone_from_website(lead.website, lead.country_code or 'US')
+                        if phone:
+                            lead.phone = phone
+                            stats['phones_updated'] += 1
                             changed = True
-            if changed:
-                refresh_lead_contact_fields(lead)
-                stats['updated'] += 1
-            if stats['checked'] % commit_every == 0:
-                db.session.commit()
+                    if not lead.facebook_url or not lead.instagram_url:
+                        profiles = self._find_social_profiles_from_website(lead.website)
+                        for field, value in profiles.items():
+                            if value and not getattr(lead, field):
+                                setattr(lead, field, value)
+                                stats['social_profiles_updated'] += 1
+                                changed = True
+                if changed:
+                    refresh_lead_contact_fields(lead)
+                    stats['updated'] += 1
+                if stats['checked'] % commit_every == 0:
+                    db.session.commit()
 
-        db.session.commit()
-        logger.info(f"Email enrichment complete: {stats}")
-        return stats
+            db.session.commit()
+            logger.info(f"Email enrichment complete: {stats}")
+            return stats
+        finally:
+            self.email_enrichment_lock.release()
 
     def clean_and_score_leads(self):
         """Deduplicate, mark inactive leads, and score usable records."""
