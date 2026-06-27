@@ -51,7 +51,8 @@ LEAD_JOB_IDS = {
     'enrich_contact_info',
     'find_emails',
     'clean_leads',
-    'sync_leads_to_sheets'
+    'sync_leads_to_sheets',
+    'usa_local_business_collection'
 }
 
 
@@ -200,6 +201,14 @@ def init_scheduler():
                 Config.OPENSTREETMAP_INTERVAL_MINUTES,
                 first_run_delay_minutes=7
             )
+        if Config.ENABLE_USA_LOCAL_BUSINESS_COLLECTION:
+            add_interval_job(
+                'usa_local_business_collection',
+                'Collect USA local-business prospects',
+                lead_collector.collect_usa_local_businesses,
+                Config.USA_LOCAL_BUSINESS_INTERVAL_MINUTES,
+                first_run_delay_minutes=3
+            )
         add_interval_job(
             'find_emails',
             'Find lead emails',
@@ -272,6 +281,7 @@ def index():
             'scheduler_jobs': '/scheduler/jobs',
             'public_dataset_collection': 'POST /trigger/public-dataset-collection',
             'openstreetmap_collection': 'POST /trigger/openstreetmap-collection',
+            'usa_local_business_collection': 'POST /trigger/usa-local-business-collection',
             'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
             'enrich_contact_info': 'POST /trigger/enrich-contact-info',
             'find_emails': 'POST /trigger/find-emails'
@@ -319,6 +329,7 @@ def lead_collection_status():
         sources = {}
         districts = {}
         contact_quality = {}
+        markets = {}
 
         for source, count in db.session.query(Lead.source, db.func.count(Lead.id)).group_by(Lead.source):
             sources[source or 'unknown'] = count
@@ -328,6 +339,9 @@ def lead_collection_status():
 
         for quality, count in db.session.query(Lead.contact_quality, db.func.count(Lead.id)).group_by(Lead.contact_quality):
             contact_quality[quality or 'unknown'] = count
+
+        for market, count in db.session.query(Lead.market, db.func.count(Lead.id)).group_by(Lead.market):
+            markets[market or 'unknown'] = count
 
         lead_jobs = []
         for job in scheduler.get_jobs():
@@ -389,6 +403,7 @@ def lead_collection_status():
             'leads_last_7d': Lead.query.filter(Lead.created_at >= last_7d).count(),
             'last_lead_at': latest_lead.created_at.isoformat() if latest_lead else None,
             'source_counts': sources,
+            'market_counts': markets,
             'district_counts': districts,
             'lead_jobs': lead_jobs,
             'recent_workflow_logs': get_recent_workflow_logs(limit=20),
@@ -608,6 +623,30 @@ def trigger_sync_leads_to_sheets():
             'status': 'error',
             'message': str(e)
         }), 500
+
+
+@app.route('/trigger/usa-local-business-collection', methods=['POST'])
+@require_admin
+def trigger_usa_local_business_collection():
+    """Manually collect USA local-business prospects from free public data."""
+    try:
+        payload = request.json if request.is_json else {}
+        result = lead_collector.collect_usa_local_businesses(
+            locations_per_run=payload.get(
+                'locations_per_run', Config.USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN
+            ),
+            results_per_location=payload.get(
+                'results_per_location', Config.USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION
+            ),
+        )
+        return jsonify({
+            'status': 'success',
+            'data': {'usa_local_businesses': result},
+            'timestamp': datetime.now().isoformat(),
+        }), 200
+    except Exception as e:
+        logger.error(f"USA local-business trigger error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/trigger/enrich-contact-info', methods=['POST'])

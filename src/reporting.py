@@ -165,98 +165,84 @@ class ReportGenerator:
             return False
 
     def sync_leads_to_sheet(self):
-        """Write all collected leads to a dedicated Google Sheets worksheet."""
+        """Write Bangladesh institutes and USA prospects to separate worksheets."""
         try:
             if not self.spreadsheet:
                 logger.info("Google Sheets not connected; skipping lead sync")
                 return {'synced': 0, 'worksheet': None}
 
-            leads = Lead.query.filter(
-                or_(Lead.active_status == None, Lead.active_status != 'closed')
-            ).order_by(Lead.score.desc(), Lead.updated_at.desc()).all()
-            worksheet = self._get_or_create_worksheet('Leads')
-            rows = [self._lead_sheet_headers()]
-            seen_contact_keys = set()
-            skipped_no_contact = 0
-            skipped_duplicates = 0
-
-            for lead in leads:
-                refresh_lead_contact_fields(lead)
-                if lead.qualification_status != 'qualified':
-                    skipped_no_contact += 1
-                    continue
-
-                contact_key = lead.phone_e164 or lead.email or lead.duplicate_key or lead.canonical_key
-                if contact_key in seen_contact_keys:
-                    skipped_duplicates += 1
-                    continue
-                seen_contact_keys.add(contact_key)
-
-                rows.append([
-                    lead.id,
-                    lead.school_name or '',
-                    lead.type or '',
-                    lead.district or '',
-                    lead.phone or '',
-                    lead.phone_e164 or '',
-                    lead.whatsapp_url or '',
-                    lead.phone_valid,
-                    lead.phone_type or '',
-                    lead.email or '',
-                    lead.website or '',
-                    lead.address or '',
-                    lead.source or '',
-                    lead.source_record_id or '',
-                    lead.source_confidence or '',
-                    lead.eiin or '',
-                    lead.upazila or '',
-                    lead.place_id or '',
-                    lead.business_status or '',
-                    lead.active_status or '',
-                    lead.rating or '',
-                    lead.user_ratings_total or '',
-                    lead.qualification_status or '',
-                    lead.contact_quality or '',
-                    lead.duplicate_key or '',
-                    lead.score or 0,
-                    lead.segment or '',
-                    lead.status or '',
-                    self._format_dt(lead.last_checked_at),
-                    self._format_dt(lead.last_enriched_at),
-                    self._format_dt(lead.email_checked_at),
-                    self._format_dt(lead.last_verified_at),
-                    self._format_dt(lead.created_at),
-                    self._format_dt(lead.updated_at)
-                ])
-
-            db.session.commit()
-            worksheet.clear()
-            if rows:
-                try:
-                    if worksheet.col_count < len(rows[0]):
-                        worksheet.resize(cols=len(rows[0]))
-                except Exception as e:
-                    logger.debug(f"Could not resize lead sheet columns: {e}")
-                worksheet.update('A1', rows, value_input_option='USER_ENTERED')
-                try:
-                    worksheet.freeze(rows=1)
-                except Exception as e:
-                    logger.debug(f"Could not freeze lead sheet header: {e}")
-
-            synced = len(rows) - 1
-            logger.info(
-                f"Google Sheets lead sync complete: synced={synced}, "
-                f"skipped_no_contact={skipped_no_contact}, skipped_duplicates={skipped_duplicates}"
-            )
+            bd_result = self._sync_market_leads('bd_education', 'Leads')
+            usa_result = self._sync_market_leads('usa_local_business', 'USA Local Business Leads')
+            synced = bd_result['synced'] + usa_result['synced']
             return {
                 'synced': synced,
-                'worksheet': worksheet.title,
-                'skipped_no_contact': skipped_no_contact,
-                'skipped_duplicates': skipped_duplicates
+                'worksheet': 'Leads + USA Local Business Leads',
+                'markets': {'bd_education': bd_result, 'usa_local_business': usa_result}
             }
         except Exception as e:
             logger.error(f"Google Sheets lead sync error: {e}")
             return {'synced': 0, 'worksheet': None, 'error': str(e)}
+
+    def _sync_market_leads(self, market, worksheet_title):
+        leads = Lead.query.filter(
+            Lead.market == market,
+            or_(Lead.active_status == None, Lead.active_status != 'closed')
+        ).order_by(Lead.score.desc(), Lead.updated_at.desc()).all()
+        worksheet = self._get_or_create_worksheet(worksheet_title)
+        rows = [self._lead_sheet_headers(market)]
+        seen_contact_keys = set()
+        skipped_no_contact = 0
+        skipped_duplicates = 0
+
+        for lead in leads:
+            refresh_lead_contact_fields(lead)
+            if lead.qualification_status != 'qualified':
+                skipped_no_contact += 1
+                continue
+            contact_key = lead.phone_e164 or lead.email or lead.duplicate_key or lead.canonical_key
+            if contact_key in seen_contact_keys:
+                skipped_duplicates += 1
+                continue
+            seen_contact_keys.add(contact_key)
+            rows.append(self._lead_sheet_row(lead, market))
+
+        db.session.commit()
+        worksheet.clear()
+        if worksheet.col_count < len(rows[0]):
+            worksheet.resize(cols=len(rows[0]))
+        worksheet.update('A1', rows, value_input_option='USER_ENTERED')
+        worksheet.freeze(rows=1)
+        return {
+            'synced': len(rows) - 1,
+            'worksheet': worksheet.title,
+            'skipped_no_contact': skipped_no_contact,
+            'skipped_duplicates': skipped_duplicates,
+        }
+
+    def _lead_sheet_row(self, lead, market):
+        common = [
+            lead.id, lead.school_name or '', lead.type or '', lead.district or '',
+            lead.phone or '', lead.phone_e164 or '', lead.whatsapp_url or '',
+            lead.phone_valid, lead.phone_type or '', lead.email or '', lead.website or '',
+        ]
+        if market == 'usa_local_business':
+            common.extend([
+                lead.instagram_url or '', lead.facebook_url or '', lead.owner_name or '',
+                lead.prospect_problem or '', lead.city or '', lead.state or '',
+            ])
+        else:
+            common.extend([lead.eiin or '', lead.upazila or ''])
+        common.extend([
+            lead.address or '', lead.source or '', lead.source_record_id or '',
+            lead.source_confidence or '', lead.place_id or '', lead.business_status or '',
+            lead.active_status or '', lead.rating or '', lead.user_ratings_total or '',
+            lead.qualification_status or '', lead.contact_quality or '', lead.duplicate_key or '',
+            lead.score or 0, lead.segment or '', lead.status or '',
+            self._format_dt(lead.last_checked_at), self._format_dt(lead.last_enriched_at),
+            self._format_dt(lead.email_checked_at), self._format_dt(lead.last_verified_at),
+            self._format_dt(lead.created_at), self._format_dt(lead.updated_at),
+        ])
+        return common
 
     def _get_or_create_worksheet(self, title):
         try:
@@ -264,17 +250,25 @@ class ReportGenerator:
         except gspread.WorksheetNotFound:
             return self.spreadsheet.add_worksheet(title=title, rows=1000, cols=40)
 
-    def _lead_sheet_headers(self):
-        return [
-            'id', 'school_name', 'type', 'district', 'phone',
+    def _lead_sheet_headers(self, market='bd_education'):
+        headers = [
+            'id', 'business_name' if market == 'usa_local_business' else 'school_name', 'type', 'location', 'phone',
             'phone_e164', 'whatsapp_url', 'phone_valid', 'phone_type',
-            'email', 'website', 'address', 'source', 'source_record_id',
-            'source_confidence', 'eiin', 'upazila', 'place_id', 'business_status',
+            'email', 'website',
+        ]
+        if market == 'usa_local_business':
+            headers.extend(['instagram', 'facebook', 'owner_manager', 'prospect_problem', 'city', 'state'])
+        else:
+            headers.extend(['eiin', 'upazila'])
+        headers.extend([
+            'address', 'source', 'source_record_id',
+            'source_confidence', 'place_id', 'business_status',
             'active_status', 'rating', 'user_ratings_total', 'qualification_status',
             'contact_quality', 'duplicate_key', 'score', 'segment', 'status',
             'last_checked_at', 'last_enriched_at', 'email_checked_at',
             'last_verified_at', 'created_at', 'updated_at'
-        ]
+        ])
+        return headers
 
     def _format_dt(self, value):
         return value.isoformat() if value else ''

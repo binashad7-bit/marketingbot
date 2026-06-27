@@ -23,6 +23,7 @@ from src.database import (
     get_source_cursor,
     mark_search_task_result,
     normalize_bd_phone,
+    normalize_phone,
     record_api_usage,
     refresh_lead_contact_fields,
     update_source_cursor,
@@ -39,10 +40,25 @@ class LeadCollector:
         r'\b(permanently\s+closed|temporarily\s+closed|closed)\b|বন্ধ',
         re.IGNORECASE
     )
+    USA_LOCATIONS = [
+        {'city': 'New York', 'state': 'NY', 'bbox': (40.4774, -74.2591, 40.9176, -73.7004)},
+        {'city': 'Los Angeles', 'state': 'CA', 'bbox': (33.7037, -118.6682, 34.3373, -118.1553)},
+        {'city': 'Chicago', 'state': 'IL', 'bbox': (41.6445, -87.9401, 42.0230, -87.5241)},
+        {'city': 'Houston', 'state': 'TX', 'bbox': (29.5236, -95.9097, 30.1107, -95.0145)},
+        {'city': 'Phoenix', 'state': 'AZ', 'bbox': (33.2903, -112.3240, 33.9206, -111.9261)},
+        {'city': 'Philadelphia', 'state': 'PA', 'bbox': (39.8670, -75.2803, 40.1379, -74.9558)},
+        {'city': 'San Antonio', 'state': 'TX', 'bbox': (29.1872, -98.8041, 29.7180, -98.2229)},
+        {'city': 'San Diego', 'state': 'CA', 'bbox': (32.5343, -117.2825, 33.1142, -116.9057)},
+        {'city': 'Dallas', 'state': 'TX', 'bbox': (32.6175, -97.0005, 33.0238, -96.4636)},
+        {'city': 'Austin', 'state': 'TX', 'bbox': (30.0987, -97.9384, 30.5169, -97.5615)},
+        {'city': 'Miami', 'state': 'FL', 'bbox': (25.7090, -80.3198, 25.8558, -80.1392)},
+        {'city': 'Atlanta', 'state': 'GA', 'bbox': (33.6478, -84.5511, 33.8868, -84.2896)},
+    ]
 
     def __init__(self):
         self.google_maps_api_key = Config.GOOGLE_MAPS_API_KEY
         self.hunter_api_key = Config.HUNTER_API_KEY
+        self.google_places_available = True
 
     def run_autonomous_cycle(self):
         """Run one safe, repeatable lead-only cycle."""
@@ -135,6 +151,9 @@ class LeadCollector:
             query_plan = query_plan[:max_queries]
 
         for district, keyword, task in query_plan:
+            if not self.google_places_available:
+                logger.info("Google Places collection stopped after provider denied the request")
+                break
             try:
                 query_stats = self._collect_google_maps_query(keyword, district, results_per_query)
                 self._merge_stats(stats, query_stats)
@@ -167,6 +186,8 @@ class LeadCollector:
                 break
             if status not in ('OK', None):
                 logger.info(f"Google Places status={status} query={search_query} error={data.get('error_message')}")
+                if status in {'REQUEST_DENIED', 'OVER_DAILY_LIMIT'}:
+                    self.google_places_available = False
                 break
 
             results = data.get('results', [])
@@ -186,7 +207,7 @@ class LeadCollector:
             if not page_token:
                 break
 
-        return upserts
+        return stats
 
     def _get_google_places_page(self, url, params, is_page_token_request=False):
         if not is_page_token_request:
@@ -273,7 +294,10 @@ class LeadCollector:
                 success=response.status_code < 400
             )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        if 'maps.googleapis.com' in url and data.get('status') in {'REQUEST_DENIED', 'OVER_DAILY_LIMIT'}:
+            self.google_places_available = False
+        return data
 
     def collect_from_facebook_groups(self):
         logger.info("Facebook collection skipped: use official Meta APIs after developer access is ready")
@@ -389,6 +413,132 @@ class LeadCollector:
         if 'technical' in text or 'vocational' in text:
             return 'Technical Institute'
         return 'School'
+
+    def collect_usa_local_businesses(self, locations_per_run=None, results_per_location=None):
+        """Collect the requested USA local-business niches from free OSM data."""
+        stats = self._source_stats()
+        if not Config.ENABLE_USA_LOCAL_BUSINESS_COLLECTION:
+            return stats
+
+        niches = list(Config.USA_LOCAL_BUSINESS_NICHES or [])
+        tasks = [(location, niche) for location in self.USA_LOCATIONS for niche in niches]
+        if not tasks:
+            return stats
+
+        batch_size = locations_per_run or Config.USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN
+        result_limit = results_per_location or Config.USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION
+        cursor = get_source_cursor('usa_local_business_osm')
+        start = cursor.cursor % len(tasks)
+        selected = (tasks[start:] + tasks[:start])[:batch_size]
+        processed_tasks = 0
+
+        for location, niche in selected:
+            label = f"{niche} in {location['city']}, {location['state']}"
+            try:
+                query = self._build_usa_overpass_query(location['bbox'], niche, result_limit)
+                elements = self._fetch_overpass_elements(query, label)
+                for element in elements:
+                    stats['processed'] += 1
+                    lead = self._process_usa_osm_business(element, location, niche)
+                    self._record_source_result(stats, lead)
+                processed_tasks += 1
+                time.sleep(random.uniform(1.0, 2.0))
+            except Exception as e:
+                logger.warning(f"USA local-business collection failed for {label}: {e}")
+
+        update_source_cursor(
+            'usa_local_business_osm',
+            (start + max(processed_tasks, 1)) % len(tasks),
+            total_seen=len(tasks),
+            meta={
+                'last_tasks': [f"{niche}:{location['city']}" for location, niche in selected],
+                'last_stats': stats,
+            }
+        )
+        logger.info(f"USA local-business collection complete: {stats}")
+        return stats
+
+    def _build_usa_overpass_query(self, bbox, niche, limit):
+        south, west, north, east = bbox
+        limit = max(10, min(int(limit), 250))
+        niche_key = niche.lower()
+        if 'med spa' in niche_key:
+            selectors = (
+                f'nwr["name"~"med(ical)? spa|aesthetic|medspa",i]({south},{west},{north},{east});\n'
+                f'nwr["beauty"="spa"]({south},{west},{north},{east});'
+            )
+        elif 'real estate' in niche_key:
+            selectors = (
+                f'nwr["office"~"estate_agent|property_management"]({south},{west},{north},{east});\n'
+                f'nwr["name"~"real estate|realtor|realty",i]({south},{west},{north},{east});'
+            )
+        else:
+            selectors = f'nwr["amenity"~"^(restaurant|cafe)$"]({south},{west},{north},{east});'
+        return f"""
+[out:json][timeout:45];
+(
+  {selectors}
+);
+out tags center qt {limit};
+"""
+
+    def _process_usa_osm_business(self, element, location, niche):
+        tags = element.get('tags') or {}
+        name = (tags.get('name') or tags.get('official_name') or '').strip()
+        if not name or self._looks_closed(name):
+            return None
+
+        raw_phone = tags.get('contact:phone') or tags.get('phone') or tags.get('contact:mobile')
+        email = self._normalize_email_value(tags.get('contact:email') or tags.get('email'))
+        website = self._clean_website_url(tags.get('contact:website') or tags.get('website') or '')
+        facebook = self._social_url(tags.get('contact:facebook') or tags.get('facebook'), 'facebook.com')
+        instagram = self._social_url(tags.get('contact:instagram') or tags.get('instagram'), 'instagram.com')
+        if not (raw_phone or email or website):
+            return None
+
+        address = self._osm_address(tags)
+        if not address:
+            address = f"{location['city']}, {location['state']}, USA"
+        osm_id = f"osm:US:{element.get('type')}:{element.get('id')}"
+        missing = []
+        if not instagram and not facebook:
+            missing.append('No social profiles linked in public listing')
+        if not email:
+            missing.append('Email not publicly listed')
+        if not website:
+            missing.append('No official website linked')
+
+        return add_lead(
+            school_name=name,
+            phone=raw_phone,
+            email=email,
+            district=f"{location['city']}, {location['state']}",
+            type=niche,
+            source='openstreetmap_usa',
+            source_record_id=osm_id,
+            source_confidence=65,
+            website=website,
+            address=address,
+            place_id=osm_id,
+            business_status='OPERATIONAL',
+            active_status='active',
+            market='usa_local_business',
+            country_code='US',
+            state=location['state'],
+            city=location['city'],
+            facebook_url=facebook,
+            instagram_url=instagram,
+            prospect_problem='; '.join(missing),
+            last_checked_at=datetime.utcnow(),
+        )
+
+    def _social_url(self, value, domain):
+        if not value:
+            return None
+        value = str(value).strip()
+        if value.startswith('http://') or value.startswith('https://'):
+            return value[:255]
+        return f"https://{domain}/{value.lstrip('@/')}"[:255]
 
     def _slugify(self, value):
         return re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')[:120]
@@ -606,22 +756,21 @@ out tags center qt {limit};
         leads = Lead.query.filter(
             Lead.source == 'google_maps',
             or_(Lead.active_status == None, Lead.active_status != 'closed'),
+            or_(Lead.last_enriched_at == None, Lead.last_enriched_at < cutoff),
             or_(
                 Lead.phone == None,
                 Lead.phone == '',
                 Lead.website == None,
                 Lead.website == '',
                 Lead.place_id == None,
-                Lead.business_status == None,
-                Lead.last_enriched_at == None,
-                Lead.last_enriched_at < cutoff
+                Lead.business_status == None
             )
-        ).limit(limit).all()
+        ).limit(min(limit, 100)).all()
 
         for lead in leads:
             try:
                 stats['checked'] += 1
-                if not can_use_api('google_places', Config.GOOGLE_PLACES_DAILY_CALL_LIMIT):
+                if not self.google_places_available or not can_use_api('google_places', Config.GOOGLE_PLACES_DAILY_CALL_LIMIT):
                     logger.info("Contact enrichment paused: Google Places quota exhausted mid-run")
                     stats['quota_available'] = False
                     stats['skipped'] += len(leads) - stats['checked'] + 1
@@ -981,7 +1130,7 @@ out tags center qt {limit};
             db.func.lower(Lead.email) == email.lower()
         ).first() is not None
 
-    def _find_phone_from_website(self, website):
+    def _find_phone_from_website(self, website, country_code='BD'):
         candidates = [website.rstrip('/')]
         for path in ('contact', 'contact-us', 'about', 'about-us', 'admission'):
             candidates.append(f"{website.rstrip('/')}/{path}")
@@ -1004,7 +1153,7 @@ out tags center qt {limit};
                 values.append(soup.get_text(' ', strip=True))
 
                 for value in values:
-                    phone_info = normalize_bd_phone(value)
+                    phone_info = normalize_phone(value, country_code)
                     if phone_info['phone_valid']:
                         return phone_info['phone']
             except Exception as e:
@@ -1012,11 +1161,39 @@ out tags center qt {limit};
 
         return None
 
+    def _find_social_profiles_from_website(self, website):
+        profiles = {'facebook_url': None, 'instagram_url': None}
+        try:
+            response = requests.get(
+                website,
+                timeout=8,
+                allow_redirects=True,
+                headers={'User-Agent': 'Mozilla/5.0 (compatible; PathshalaPro prospect enrichment)'},
+            )
+            if response.status_code >= 400:
+                return profiles
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for link in soup.select('a[href]'):
+                href = urljoin(response.url, link.get('href', '')).split('?', 1)[0]
+                host = urlparse(href).netloc.lower()
+                if not profiles['facebook_url'] and ('facebook.com' in host or host == 'fb.com'):
+                    if not any(path in href.lower() for path in ('/share', '/sharer', '/plugins')):
+                        profiles['facebook_url'] = href[:255]
+                if not profiles['instagram_url'] and 'instagram.com' in host:
+                    profiles['instagram_url'] = href[:255]
+                if all(profiles.values()):
+                    break
+        except Exception as e:
+            logger.debug(f"Website social profile lookup failed for {website}: {e}")
+        return profiles
+
     def enrich_missing_emails(self, limit=50, commit_every=10, force=False):
         """Enrich a small quota-aware batch of active leads with websites."""
         stats = {
             'checked': 0,
             'updated': 0,
+            'phones_updated': 0,
+            'social_profiles_updated': 0,
             'skipped_no_website': 0,
             'hunter_searches': 0,
             'force': force
@@ -1042,8 +1219,25 @@ out tags center qt {limit};
                 stats['hunter_searches'] = hunter_searches
             lead.email_checked_at = datetime.utcnow()
             stats['checked'] += 1
+            changed = False
             if email and not self._email_used_by_other_lead(email, lead.id):
                 lead.email = email.lower()
+                changed = True
+            if lead.market == 'usa_local_business':
+                if not lead.phone_valid:
+                    phone = self._find_phone_from_website(lead.website, lead.country_code or 'US')
+                    if phone:
+                        lead.phone = phone
+                        stats['phones_updated'] += 1
+                        changed = True
+                if not lead.facebook_url or not lead.instagram_url:
+                    profiles = self._find_social_profiles_from_website(lead.website)
+                    for field, value in profiles.items():
+                        if value and not getattr(lead, field):
+                            setattr(lead, field, value)
+                            stats['social_profiles_updated'] += 1
+                            changed = True
+            if changed:
                 refresh_lead_contact_fields(lead)
                 stats['updated'] += 1
             if stats['checked'] % commit_every == 0:

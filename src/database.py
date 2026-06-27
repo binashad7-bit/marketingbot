@@ -45,6 +45,14 @@ class Lead(db.Model):
     contact_quality = db.Column(db.String(30), default='no_contact')
     duplicate_key = db.Column(db.String(255), nullable=True, index=True)
     last_verified_at = db.Column(db.DateTime, nullable=True)
+    market = db.Column(db.String(50), default='bd_education', index=True)
+    country_code = db.Column(db.String(2), default='BD', index=True)
+    state = db.Column(db.String(100), nullable=True, index=True)
+    city = db.Column(db.String(100), nullable=True, index=True)
+    facebook_url = db.Column(db.String(255), nullable=True)
+    instagram_url = db.Column(db.String(255), nullable=True)
+    owner_name = db.Column(db.String(255), nullable=True)
+    prospect_problem = db.Column(db.Text, nullable=True)
     
     # Lead Scoring
     score = db.Column(db.Integer, default=0)
@@ -236,6 +244,14 @@ def ensure_schema():
         'contact_quality': "VARCHAR(30) DEFAULT 'no_contact'",
         'duplicate_key': 'VARCHAR(255)',
         'last_verified_at': 'TIMESTAMP',
+        'market': "VARCHAR(50) DEFAULT 'bd_education'",
+        'country_code': "VARCHAR(2) DEFAULT 'BD'",
+        'state': 'VARCHAR(100)',
+        'city': 'VARCHAR(100)',
+        'facebook_url': 'VARCHAR(255)',
+        'instagram_url': 'VARCHAR(255)',
+        'owner_name': 'VARCHAR(255)',
+        'prospect_problem': 'TEXT',
     }
 
     dialect = db.engine.dialect.name
@@ -259,6 +275,10 @@ def ensure_schema():
         'CREATE INDEX IF NOT EXISTS ix_leads_canonical_key ON leads (canonical_key)',
         'CREATE INDEX IF NOT EXISTS ix_leads_qualification_status ON leads (qualification_status)',
         'CREATE INDEX IF NOT EXISTS ix_leads_duplicate_key ON leads (duplicate_key)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_market ON leads (market)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_country_code ON leads (country_code)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_state ON leads (state)',
+        'CREATE INDEX IF NOT EXISTS ix_leads_city ON leads (city)',
         'CREATE UNIQUE INDEX IF NOT EXISTS ux_search_tasks_district_keyword ON search_tasks (district, keyword)',
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_place_id_not_null ON leads (place_id) WHERE place_id IS NOT NULL AND place_id <> ''",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_phone_e164_not_null ON leads (phone_e164) WHERE phone_e164 IS NOT NULL AND phone_e164 <> ''",
@@ -280,6 +300,11 @@ def ensure_schema():
 def _backfill_lead_source_metadata(dialect):
     """Fill source metadata for leads collected before these columns existed."""
     statements = [
+        """
+        UPDATE leads
+        SET market = 'bd_education', country_code = 'BD'
+        WHERE market IS NULL OR market = ''
+        """,
         """
         UPDATE leads
         SET source_record_id = place_id
@@ -321,7 +346,10 @@ def _backfill_lead_source_metadata(dialect):
 def add_lead(school_name, phone, email, district, type, source, **kwargs):
     """Create or update a lead using stable identifiers to avoid duplicates."""
     try:
-        phone_info = normalize_bd_phone(phone)
+        country_code = (kwargs.get('country_code') or 'BD').upper()
+        kwargs['country_code'] = country_code
+        kwargs.setdefault('market', 'usa_local_business' if country_code == 'US' else 'bd_education')
+        phone_info = normalize_phone(phone, country_code)
         phone = phone_info['phone']
         email = _normalize_email(email)
         kwargs.setdefault('phone_e164', phone_info['phone_e164'])
@@ -389,7 +417,7 @@ def add_lead(school_name, phone, email, district, type, source, **kwargs):
 def _merge_lead_fields(lead, fields):
     always_refresh = {
         'business_status', 'active_status', 'rating', 'user_ratings_total',
-        'last_checked_at', 'last_enriched_at', 'email_checked_at',
+        'last_enriched_at', 'email_checked_at',
         'phone_e164', 'whatsapp_url', 'phone_valid', 'phone_type',
         'qualification_status', 'contact_quality', 'duplicate_key',
         'last_verified_at', 'source_confidence'
@@ -409,6 +437,13 @@ def _merge_lead_fields(lead, fields):
 
 def normalize_bd_phone(phone):
     """Normalize Bangladeshi numbers into local and WhatsApp-ready formats."""
+    return normalize_phone(phone, 'BD')
+
+
+def normalize_phone(phone, country_code='BD'):
+    """Normalize supported local numbers to E.164 and a click-ready WhatsApp URL."""
+    if (country_code or 'BD').upper() == 'US':
+        return _normalize_us_phone(phone)
     if not phone:
         return _phone_result()
 
@@ -424,6 +459,22 @@ def normalize_bd_phone(phone):
 
     parsed.sort(key=lambda item: (0 if item['phone_type'] == 'mobile' else 1, item['phone']))
     return parsed[0]
+
+
+def _normalize_us_phone(phone):
+    if not phone:
+        return _phone_result()
+    candidates = re.findall(r'(?:\+?1[\s().-]*)?(?:\d[\s().-]*){10}', str(phone))
+    for candidate in candidates or [str(phone)]:
+        digits = re.sub(r'\D+', '', candidate)
+        if len(digits) == 11 and digits.startswith('1'):
+            digits = digits[1:]
+        if len(digits) != 10 or digits[0] in '01' or digits[3] in '01':
+            continue
+        e164 = f'+1{digits}'
+        display = f'({digits[:3]}) {digits[3:6]}-{digits[6:]}'
+        return _phone_result(display, e164, f'https://wa.me/{e164[1:]}', True, 'business')
+    return _phone_result()
 
 
 def _extract_phone_candidates(text):
@@ -535,7 +586,7 @@ def _qualification_fields(email, phone_valid, active_status=None, has_website=Fa
 
 def refresh_lead_contact_fields(lead):
     """Recalculate normalized contact and qualification fields for an existing lead."""
-    phone_info = normalize_bd_phone(lead.phone)
+    phone_info = normalize_phone(lead.phone, lead.country_code or 'BD')
     lead.phone = phone_info['phone']
     lead.phone_e164 = phone_info['phone_e164']
     lead.whatsapp_url = phone_info['whatsapp_url']
