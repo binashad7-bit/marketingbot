@@ -170,12 +170,13 @@ def init_scheduler():
     )
 
     if lead_collection_enabled:
-        add_interval_job(
-            'lead_generation_cycle',
-            'Autonomous Google Maps lead generation cycle',
-            lead_collector.run_autonomous_cycle,
-            Config.LEAD_COLLECTION_INTERVAL_MINUTES
-        )
+        if Config.ENABLE_BD_EDUCATION_COLLECTION:
+            add_interval_job(
+                'lead_generation_cycle',
+                'Autonomous Bangladesh education lead generation cycle',
+                lead_collector.run_autonomous_cycle,
+                Config.LEAD_COLLECTION_INTERVAL_MINUTES
+            )
         add_interval_job(
             'enrich_contact_info',
             'Enrich lead phone, website, and active status',

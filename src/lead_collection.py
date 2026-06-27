@@ -2,6 +2,7 @@ import csv
 import io
 import random
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from html import unescape
@@ -112,6 +113,7 @@ class LeadCollector:
         self.google_maps_api_key = Config.GOOGLE_MAPS_API_KEY
         self.hunter_api_key = Config.HUNTER_API_KEY
         self.google_places_available = True
+        self.usa_collection_lock = threading.Lock()
 
     def run_autonomous_cycle(self):
         """Run one safe, repeatable lead-only cycle."""
@@ -481,44 +483,52 @@ class LeadCollector:
         stats = self._source_stats()
         if not Config.ENABLE_USA_LOCAL_BUSINESS_COLLECTION:
             return stats
-
-        niches = list(Config.USA_LOCAL_BUSINESS_NICHES or [])
-        tasks = [(location, niche) for location in self.USA_LOCATIONS for niche in niches]
-        if not tasks:
+        if not self.usa_collection_lock.acquire(blocking=False):
+            logger.info("USA local-business collection skipped: another run is already active")
+            stats['skipped'] = locations_per_run or Config.USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN
+            stats['busy'] = True
             return stats
 
-        batch_size = locations_per_run or Config.USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN
-        result_limit = results_per_location or Config.USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION
-        cursor = get_source_cursor('usa_local_business_osm')
-        start = cursor.cursor % len(tasks)
-        selected = (tasks[start:] + tasks[:start])[:batch_size]
-        processed_tasks = 0
+        try:
+            niches = list(Config.USA_LOCAL_BUSINESS_NICHES or [])
+            tasks = [(location, niche) for location in self.USA_LOCATIONS for niche in niches]
+            if not tasks:
+                return stats
 
-        for location, niche in selected:
-            label = f"{niche} in {location['city']}, {location['state']}"
-            try:
-                query = self._build_usa_overpass_query(location['bbox'], niche, result_limit)
-                elements = self._fetch_overpass_elements(query, label)
-                for element in elements:
-                    stats['processed'] += 1
-                    lead = self._process_usa_osm_business(element, location, niche)
-                    self._record_source_result(stats, lead)
-                processed_tasks += 1
-                time.sleep(random.uniform(1.0, 2.0))
-            except Exception as e:
-                logger.warning(f"USA local-business collection failed for {label}: {e}")
+            batch_size = locations_per_run or Config.USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN
+            result_limit = results_per_location or Config.USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION
+            cursor = get_source_cursor('usa_local_business_osm')
+            start = cursor.cursor % len(tasks)
+            selected = (tasks[start:] + tasks[:start])[:batch_size]
+            processed_tasks = 0
 
-        update_source_cursor(
-            'usa_local_business_osm',
-            (start + max(processed_tasks, 1)) % len(tasks),
-            total_seen=len(tasks),
-            meta={
-                'last_tasks': [f"{niche}:{location['city']}" for location, niche in selected],
-                'last_stats': stats,
-            }
-        )
-        logger.info(f"USA local-business collection complete: {stats}")
-        return stats
+            for location, niche in selected:
+                label = f"{niche} in {location['city']}, {location['state']}"
+                try:
+                    query = self._build_usa_overpass_query(location['bbox'], niche, result_limit)
+                    elements = self._fetch_overpass_elements(query, label)
+                    for element in elements:
+                        stats['processed'] += 1
+                        lead = self._process_usa_osm_business(element, location, niche)
+                        self._record_source_result(stats, lead)
+                    processed_tasks += 1
+                    time.sleep(random.uniform(2.0, 4.0))
+                except Exception as e:
+                    logger.warning(f"USA local-business collection failed for {label}: {e}")
+
+            update_source_cursor(
+                'usa_local_business_osm',
+                (start + max(processed_tasks, 1)) % len(tasks),
+                total_seen=len(tasks),
+                meta={
+                    'last_tasks': [f"{niche}:{location['city']}" for location, niche in selected],
+                    'last_stats': stats,
+                }
+            )
+            logger.info(f"USA local-business collection complete: {stats}")
+            return stats
+        finally:
+            self.usa_collection_lock.release()
 
     def _build_usa_overpass_query(self, bbox, niche, limit):
         south, west, north, east = bbox
