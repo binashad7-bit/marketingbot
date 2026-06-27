@@ -184,7 +184,7 @@ def init_scheduler():
             job_kwargs={'limit': Config.CONTACT_ENRICH_LIMIT, 'find_email': False},
             first_run_delay_minutes=5
         )
-        if Config.ENABLE_PUBLIC_DATASET_COLLECTION:
+        if Config.ENABLE_BD_EDUCATION_COLLECTION and Config.ENABLE_PUBLIC_DATASET_COLLECTION:
             add_interval_job(
                 'public_dataset_collection',
                 'Collect leads from public open-data contact datasets',
@@ -193,7 +193,7 @@ def init_scheduler():
                 job_kwargs={'limit': Config.PUBLIC_DATASET_BATCH_SIZE},
                 first_run_delay_minutes=6
             )
-        if Config.ENABLE_OPENSTREETMAP_COLLECTION:
+        if Config.ENABLE_BD_EDUCATION_COLLECTION and Config.ENABLE_OPENSTREETMAP_COLLECTION:
             add_interval_job(
                 'openstreetmap_collection',
                 'Collect leads from OpenStreetMap public data',
@@ -282,6 +282,7 @@ def index():
             'public_dataset_collection': 'POST /trigger/public-dataset-collection',
             'openstreetmap_collection': 'POST /trigger/openstreetmap-collection',
             'usa_local_business_collection': 'POST /trigger/usa-local-business-collection',
+            'usa_local_business_bulk_collection': 'POST /trigger/usa-local-business-bulk-collection',
             'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
             'enrich_contact_info': 'POST /trigger/enrich-contact-info',
             'find_emails': 'POST /trigger/find-emails'
@@ -646,6 +647,44 @@ def trigger_usa_local_business_collection():
         }), 200
     except Exception as e:
         logger.error(f"USA local-business trigger error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/trigger/usa-local-business-bulk-collection', methods=['POST'])
+@require_admin
+def trigger_usa_local_business_bulk_collection():
+    """Run multiple USA local-business batches without touching BD sources."""
+    try:
+        payload = request.json if request.is_json else {}
+        batches = max(1, min(int(payload.get('batches', 3)), 12))
+        locations_per_run = payload.get(
+            'locations_per_run', Config.USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN
+        )
+        results_per_location = payload.get(
+            'results_per_location', Config.USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION
+        )
+        totals = {'processed': 0, 'created': 0, 'updated': 0, 'unchanged': 0, 'skipped': 0}
+        batch_results = []
+        for _ in range(batches):
+            result = lead_collector.collect_usa_local_businesses(
+                locations_per_run=locations_per_run,
+                results_per_location=results_per_location,
+            )
+            batch_results.append(result)
+            for key in totals:
+                totals[key] += int(result.get(key, 0) or 0)
+        sheet_result = reporting_manager.sync_leads_to_sheet()
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'usa_local_businesses': totals,
+                'batches': batch_results,
+                'sheet_sync': sheet_result,
+            },
+            'timestamp': datetime.now().isoformat(),
+        }), 200
+    except Exception as e:
+        logger.error(f"USA local-business bulk trigger error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 

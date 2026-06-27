@@ -46,7 +46,9 @@ INSTITUTE_KEYWORDS = [
 ]
 
 USA_LOCAL_BUSINESS_NICHES = [
-    'Med Spa', 'Real Estate', 'Restaurant/Cafe'
+    'Med Spa', 'Real Estate', 'Restaurant/Cafe', 'Dental Clinic',
+    'Salon/Barbershop', 'Gym/Fitness', 'Chiropractor', 'Auto Repair',
+    'Home Services', 'Law Firm', 'Accounting/Tax', 'Veterinary Clinic'
 ]
 
 
@@ -108,6 +110,9 @@ class Config:
     SCHEDULER_TIMEZONE = os.getenv('SCHEDULER_TIMEZONE', 'UTC')
     SCHEDULER_MODE = os.getenv('SCHEDULER_MODE', 'all').lower()
     ENABLE_LEAD_COLLECTION = os.getenv('ENABLE_LEAD_COLLECTION', 'true').lower() == 'true'
+    ENABLE_BD_EDUCATION_COLLECTION = os.getenv(
+        'ENABLE_BD_EDUCATION_COLLECTION', 'false'
+    ).lower() == 'true'
     ENABLE_MARKETING_JOBS = os.getenv('ENABLE_MARKETING_JOBS', 'true').lower() == 'true'
     ENABLE_REPORTING_JOBS = os.getenv('ENABLE_REPORTING_JOBS', 'true').lower() == 'true'
     LEAD_COLLECTION_DISTRICTS = _csv_list_env('LEAD_COLLECTION_DISTRICTS', BANGLADESH_DISTRICTS)
@@ -123,6 +128,7 @@ class Config:
         'OVERPASS_API_URLS',
         [
             'https://overpass-api.de/api/interpreter',
+            'https://overpass.private.coffee/api/interpreter',
             'https://overpass.kumi.systems/api/interpreter'
         ]
     )
@@ -150,9 +156,9 @@ class Config:
     USA_LOCAL_BUSINESS_NICHES = _csv_list_env(
         'USA_LOCAL_BUSINESS_NICHES', USA_LOCAL_BUSINESS_NICHES
     )
-    USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN = int(os.getenv('USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN', 3))
-    USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION = int(os.getenv('USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION', 150))
-    USA_LOCAL_BUSINESS_INTERVAL_MINUTES = int(os.getenv('USA_LOCAL_BUSINESS_INTERVAL_MINUTES', 360))
+    USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN = int(os.getenv('USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN', 12))
+    USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION = int(os.getenv('USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION', 250))
+    USA_LOCAL_BUSINESS_INTERVAL_MINUTES = int(os.getenv('USA_LOCAL_BUSINESS_INTERVAL_MINUTES', 120))
     
     # Schedule Configuration
     SCHEDULE_CONFIG = {

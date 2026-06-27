@@ -33,7 +33,7 @@ logger.add("logs/lead_collection.log", rotation="500 MB")
 
 
 class LeadCollector:
-    """Autonomous lead collection and enrichment for Bangladesh institutes."""
+    """Autonomous lead collection and enrichment for active business prospects."""
 
     CLOSED_STATUSES = {'CLOSED_PERMANENTLY', 'CLOSED_TEMPORARILY'}
     CLOSED_NAME_PATTERN = re.compile(
@@ -53,7 +53,60 @@ class LeadCollector:
         {'city': 'Austin', 'state': 'TX', 'bbox': (30.0987, -97.9384, 30.5169, -97.5615)},
         {'city': 'Miami', 'state': 'FL', 'bbox': (25.7090, -80.3198, 25.8558, -80.1392)},
         {'city': 'Atlanta', 'state': 'GA', 'bbox': (33.6478, -84.5511, 33.8868, -84.2896)},
+        {'city': 'Boston', 'state': 'MA', 'bbox': (42.2279, -71.1912, 42.3969, -70.9238)},
+        {'city': 'Seattle', 'state': 'WA', 'bbox': (47.4919, -122.4597, 47.7341, -122.2244)},
+        {'city': 'Denver', 'state': 'CO', 'bbox': (39.6143, -105.1099, 39.9142, -104.6003)},
+        {'city': 'Las Vegas', 'state': 'NV', 'bbox': (36.0319, -115.4146, 36.3808, -114.9004)},
+        {'city': 'Orlando', 'state': 'FL', 'bbox': (28.3479, -81.5638, 28.6157, -81.1773)},
+        {'city': 'Tampa', 'state': 'FL', 'bbox': (27.8214, -82.6523, 28.1715, -82.2539)},
+        {'city': 'Charlotte', 'state': 'NC', 'bbox': (35.0105, -81.0096, 35.3931, -80.5503)},
+        {'city': 'Nashville', 'state': 'TN', 'bbox': (35.9678, -87.0549, 36.4055, -86.5156)},
+        {'city': 'Portland', 'state': 'OR', 'bbox': (45.4325, -122.8367, 45.6529, -122.4720)},
+        {'city': 'San Jose', 'state': 'CA', 'bbox': (37.1245, -122.0457, 37.4692, -121.5892)},
+        {'city': 'Sacramento', 'state': 'CA', 'bbox': (38.4376, -121.5601, 38.6855, -121.3627)},
+        {'city': 'Minneapolis', 'state': 'MN', 'bbox': (44.8634, -93.3292, 45.0512, -93.1938)},
+        {'city': 'Detroit', 'state': 'MI', 'bbox': (42.2551, -83.2879, 42.4502, -82.9104)},
+        {'city': 'Cleveland', 'state': 'OH', 'bbox': (41.3907, -81.8797, 41.5990, -81.5327)},
+        {'city': 'Columbus', 'state': 'OH', 'bbox': (39.8081, -83.2101, 40.1573, -82.7710)},
+        {'city': 'Indianapolis', 'state': 'IN', 'bbox': (39.6320, -86.3285, 39.9289, -85.9388)},
+        {'city': 'Kansas City', 'state': 'MO', 'bbox': (38.8270, -94.7650, 39.3567, -94.3855)},
+        {'city': 'St. Louis', 'state': 'MO', 'bbox': (38.5319, -90.3205, 38.7743, -90.1664)},
+        {'city': 'New Orleans', 'state': 'LA', 'bbox': (29.8655, -90.1401, 30.1995, -89.6252)},
+        {'city': 'Raleigh', 'state': 'NC', 'bbox': (35.7150, -78.8198, 35.9717, -78.4801)},
+        {'city': 'Salt Lake City', 'state': 'UT', 'bbox': (40.6999, -112.1015, 40.8538, -111.7394)},
+        {'city': 'Pittsburgh', 'state': 'PA', 'bbox': (40.3614, -80.0958, 40.5017, -79.8657)},
+        {'city': 'Cincinnati', 'state': 'OH', 'bbox': (39.0245, -84.7132, 39.2321, -84.3146)},
+        {'city': 'Fort Worth', 'state': 'TX', 'bbox': (32.5550, -97.5698, 32.9908, -97.0336)},
+        {'city': 'Jacksonville', 'state': 'FL', 'bbox': (30.1037, -82.0495, 30.5862, -81.3167)},
+        {'city': 'Virginia Beach', 'state': 'VA', 'bbox': (36.5484, -76.1507, 36.9824, -75.8670)},
+        {'city': 'Omaha', 'state': 'NE', 'bbox': (41.1609, -96.2762, 41.3931, -95.8710)},
+        {'city': 'Milwaukee', 'state': 'WI', 'bbox': (42.9208, -88.0737, 43.1940, -87.8639)},
+        {'city': 'Memphis', 'state': 'TN', 'bbox': (34.9942, -90.3055, 35.2639, -89.6371)},
+        {'city': 'Louisville', 'state': 'KY', 'bbox': (38.0884, -85.9471, 38.3802, -85.4051)},
+        {'city': 'Richmond', 'state': 'VA', 'bbox': (37.4477, -77.6012, 37.6024, -77.3856)},
+        {'city': 'Providence', 'state': 'RI', 'bbox': (41.7725, -71.4727, 41.8617, -71.3554)},
+        {'city': 'Hartford', 'state': 'CT', 'bbox': (41.7050, -72.7601, 41.8230, -72.6070)},
+        {'city': 'Honolulu', 'state': 'HI', 'bbox': (21.2549, -157.9260, 21.3900, -157.6488)},
+        {'city': 'Albuquerque', 'state': 'NM', 'bbox': (35.0004, -106.8158, 35.2180, -106.4712)},
+        {'city': 'Boise', 'state': 'ID', 'bbox': (43.5117, -116.3659, 43.6899, -116.1019)},
+        {'city': 'Spokane', 'state': 'WA', 'bbox': (47.5871, -117.5853, 47.7586, -117.2368)},
+        {'city': 'Birmingham', 'state': 'AL', 'bbox': (33.4017, -86.9631, 33.6785, -86.6068)},
+        {'city': 'Charleston', 'state': 'SC', 'bbox': (32.7170, -80.0648, 32.9370, -79.7975)},
+        {'city': 'Savannah', 'state': 'GA', 'bbox': (31.9382, -81.3034, 32.1789, -80.8425)},
+        {'city': 'Tucson', 'state': 'AZ', 'bbox': (32.0709, -111.2017, 32.3678, -110.7082)},
+        {'city': 'Fresno', 'state': 'CA', 'bbox': (36.6362, -119.9445, 36.9080, -119.6396)},
+        {'city': 'Bakersfield', 'state': 'CA', 'bbox': (35.2365, -119.2063, 35.5072, -118.7891)},
+        {'city': 'Anaheim', 'state': 'CA', 'bbox': (33.7739, -118.0189, 33.8940, -117.6721)},
+        {'city': 'Colorado Springs', 'state': 'CO', 'bbox': (38.7467, -104.9418, 39.0353, -104.6011)},
+        {'city': 'Wichita', 'state': 'KS', 'bbox': (37.5491, -97.5123, 37.8259, -97.1538)},
+        {'city': 'Tulsa', 'state': 'OK', 'bbox': (35.9699, -96.0748, 36.3360, -95.6691)},
     ]
+    CHAIN_NAME_PATTERN = re.compile(
+        r"\b(starbucks|mcdonald'?s|burger king|subway|wendy'?s|taco bell|"
+        r"chipotle|domino'?s|pizza hut|kfc|dunkin|panda express|"
+        r"walgreens|cvs|walmart|target|costco|sam'?s club|home depot|lowe'?s)\b",
+        re.IGNORECASE
+    )
 
     def __init__(self):
         self.google_maps_api_key = Config.GOOGLE_MAPS_API_KEY
@@ -66,9 +119,17 @@ class LeadCollector:
         logger.info("Autonomous lead generation cycle started")
         logger.info("=" * 50)
 
-        public_dataset_count = self.collect_from_public_datasets()
-        maps_count = self.collect_from_google_maps()
-        osm_count = self.collect_from_openstreetmap()
+        public_dataset_count = self._source_stats()
+        maps_count = self._source_stats()
+        osm_count = self._source_stats()
+        usa_count = self._source_stats()
+
+        if Config.ENABLE_BD_EDUCATION_COLLECTION:
+            public_dataset_count = self.collect_from_public_datasets()
+            maps_count = self.collect_from_google_maps()
+            osm_count = self.collect_from_openstreetmap()
+        if Config.ENABLE_USA_LOCAL_BUSINESS_COLLECTION:
+            usa_count = self.collect_usa_local_businesses()
         contact_updates = self.enrich_missing_contact_info(
             limit=Config.CONTACT_ENRICH_LIMIT,
             find_email=False
@@ -87,6 +148,7 @@ class LeadCollector:
             'public_dataset': public_dataset_count,
             'google_maps': maps_count,
             'openstreetmap': osm_count,
+            'usa_local_business': usa_count,
             'contact_updates': contact_updates,
             'email_updates': email_updates,
             'sheet_sync': sheet_sync
@@ -465,15 +527,57 @@ class LeadCollector:
         if 'med spa' in niche_key:
             selectors = (
                 f'nwr["name"~"med(ical)? spa|aesthetic|medspa",i]({south},{west},{north},{east});\n'
-                f'nwr["beauty"="spa"]({south},{west},{north},{east});'
+                f'nwr["beauty"~"^(spa|skin_care)$"]({south},{west},{north},{east});\n'
+                f'nwr["healthcare"="clinic"]["name"~"aesthetic|skin|laser",i]({south},{west},{north},{east});'
             )
         elif 'real estate' in niche_key:
             selectors = (
                 f'nwr["office"~"estate_agent|property_management"]({south},{west},{north},{east});\n'
                 f'nwr["name"~"real estate|realtor|realty",i]({south},{west},{north},{east});'
             )
-        else:
+        elif 'restaurant' in niche_key or 'cafe' in niche_key:
             selectors = f'nwr["amenity"~"^(restaurant|cafe)$"]({south},{west},{north},{east});'
+        elif 'dental' in niche_key:
+            selectors = f'nwr["amenity"="dentist"]({south},{west},{north},{east});'
+        elif 'salon' in niche_key or 'barber' in niche_key:
+            selectors = (
+                f'nwr["shop"~"^(hairdresser|beauty)$"]({south},{west},{north},{east});\n'
+                f'nwr["beauty"~"^(nails|hair|skin_care)$"]({south},{west},{north},{east});'
+            )
+        elif 'gym' in niche_key or 'fitness' in niche_key:
+            selectors = (
+                f'nwr["leisure"="fitness_centre"]({south},{west},{north},{east});\n'
+                f'nwr["sport"]["name"~"gym|fitness|pilates|yoga",i]({south},{west},{north},{east});'
+            )
+        elif 'chiropractor' in niche_key:
+            selectors = (
+                f'nwr["healthcare"="chiropractor"]({south},{west},{north},{east});\n'
+                f'nwr["name"~"chiropractic|chiropractor",i]({south},{west},{north},{east});'
+            )
+        elif 'auto' in niche_key:
+            selectors = (
+                f'nwr["shop"~"^(car_repair|tyres|car_parts)$"]({south},{west},{north},{east});\n'
+                f'nwr["craft"="automotive"]({south},{west},{north},{east});'
+            )
+        elif 'home services' in niche_key:
+            selectors = (
+                f'nwr["craft"~"^(plumber|electrician|hvac|roofer|carpenter|gardener|painter)$"]({south},{west},{north},{east});\n'
+                f'nwr["shop"~"^(hardware|doityourself)$"]({south},{west},{north},{east});'
+            )
+        elif 'law' in niche_key:
+            selectors = f'nwr["office"="lawyer"]({south},{west},{north},{east});'
+        elif 'accounting' in niche_key or 'tax' in niche_key:
+            selectors = (
+                f'nwr["office"~"^(accountant|tax_advisor)$"]({south},{west},{north},{east});\n'
+                f'nwr["name"~"accounting|tax service|bookkeeping",i]({south},{west},{north},{east});'
+            )
+        elif 'veterinary' in niche_key or 'vet' in niche_key:
+            selectors = f'nwr["amenity"="veterinary"]({south},{west},{north},{east});'
+        else:
+            selectors = (
+                f'nwr["shop"]({south},{west},{north},{east});\n'
+                f'nwr["office"]({south},{west},{north},{east});'
+            )
         return f"""
 [out:json][timeout:45];
 (
@@ -486,6 +590,8 @@ out tags center qt {limit};
         tags = element.get('tags') or {}
         name = (tags.get('name') or tags.get('official_name') or '').strip()
         if not name or self._looks_closed(name):
+            return None
+        if self._looks_large_chain(name, tags):
             return None
 
         raw_phone = tags.get('contact:phone') or tags.get('phone') or tags.get('contact:mobile')
@@ -531,6 +637,15 @@ out tags center qt {limit};
             prospect_problem='; '.join(missing),
             last_checked_at=datetime.utcnow(),
         )
+
+    def _looks_large_chain(self, name, tags):
+        brand = ' '.join(
+            str(tags.get(key, ''))
+            for key in ('brand', 'brand:wikidata', 'operator', 'network')
+            if tags.get(key)
+        )
+        text = f"{name} {brand}"
+        return bool(self.CHAIN_NAME_PATTERN.search(text))
 
     def _social_url(self, value, domain):
         if not value:
