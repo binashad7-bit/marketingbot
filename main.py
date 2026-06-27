@@ -177,14 +177,15 @@ def init_scheduler():
                 lead_collector.run_autonomous_cycle,
                 Config.LEAD_COLLECTION_INTERVAL_MINUTES
             )
-        add_interval_job(
-            'enrich_contact_info',
-            'Enrich lead phone, website, and active status',
-            lead_collector.enrich_missing_contact_info,
-            Config.CONTACT_ENRICH_INTERVAL_MINUTES,
-            job_kwargs={'limit': Config.CONTACT_ENRICH_LIMIT, 'find_email': False},
-            first_run_delay_minutes=5
-        )
+        if Config.ENABLE_BD_EDUCATION_COLLECTION:
+            add_interval_job(
+                'enrich_contact_info',
+                'Enrich lead phone, website, and active status',
+                lead_collector.enrich_missing_contact_info,
+                Config.CONTACT_ENRICH_INTERVAL_MINUTES,
+                job_kwargs={'limit': Config.CONTACT_ENRICH_LIMIT, 'find_email': False},
+                first_run_delay_minutes=5
+            )
         if Config.ENABLE_BD_EDUCATION_COLLECTION and Config.ENABLE_PUBLIC_DATASET_COLLECTION:
             add_interval_job(
                 'public_dataset_collection',
