@@ -164,6 +164,10 @@ def init_scheduler():
         Config.ENABLE_MARKETING_JOBS
         and Config.SCHEDULER_MODE in ('all', 'marketing')
     )
+    social_enabled = (
+        Config.ENABLE_FACEBOOK_POSTING
+        and Config.SCHEDULER_MODE in ('all', 'marketing', 'social')
+    )
     reporting_enabled = (
         Config.ENABLE_REPORTING_JOBS
         and Config.SCHEDULER_MODE in ('all', 'reporting')
@@ -250,27 +254,27 @@ def init_scheduler():
             hour, minute = _parse_hhmm(engagement.get('email_followups'), 16, 0)
             add_cron_job('email_followups', 'Email follow-up drip', email_campaign.run_followups, hour, minute)
 
-        if Config.ENABLE_FACEBOOK_POSTING:
-            add_interval_job(
-                'facebook_schedule_generation',
-                'Generate approval-gated Facebook content calendar',
-                facebook_poster.ensure_content_calendar,
-                360,
-                first_run_delay_minutes=2
-            )
-            post_times = Config.FACEBOOK_POST_TIMES[:Config.FACEBOOK_POSTS_PER_DAY]
-            for index, post_time in enumerate(post_times, start=1):
-                hour, minute = _parse_hhmm(post_time, 14, 0)
-                add_cron_job(
-                    f'facebook_posting_{index}',
-                    f'Facebook approved post slot {index}',
-                    facebook_poster.post_next_approved,
-                    hour,
-                    minute
-                )
-
         hour, minute = _parse_hhmm(tracking_cfg.get('email_tracking'), 20, 0)
         add_cron_job('tracking', 'Tracking and metrics', tracking_manager.run_all, hour, minute)
+
+    if social_enabled:
+        add_interval_job(
+            'facebook_schedule_generation',
+            'Generate approval-gated Facebook content calendar',
+            facebook_poster.ensure_content_calendar,
+            360,
+            first_run_delay_minutes=2
+        )
+        post_times = Config.FACEBOOK_POST_TIMES[:Config.FACEBOOK_POSTS_PER_DAY]
+        for index, post_time in enumerate(post_times, start=1):
+            hour, minute = _parse_hhmm(post_time, 14, 0)
+            add_cron_job(
+                f'facebook_posting_{index}',
+                f'Facebook approved post slot {index}',
+                facebook_poster.post_next_approved,
+                hour,
+                minute
+            )
 
     if reporting_enabled:
         reporting_cfg = Config.SCHEDULE_CONFIG.get('reporting', {})
@@ -319,7 +323,8 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'scheduler': 'running' if scheduler.running else 'stopped'
+        'scheduler': 'running' if scheduler.running else 'stopped',
+        'jobs': [job.id for job in scheduler.get_jobs()]
     }), 200
 
 
