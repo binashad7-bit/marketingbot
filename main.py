@@ -311,6 +311,7 @@ def index():
             'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
             'enrich_contact_info': 'POST /trigger/enrich-contact-info',
             'find_emails': 'POST /trigger/find-emails',
+            'facebook_calendar_status': '/facebook-calendar/status',
             'generate_facebook_schedule': 'POST /trigger/generate-facebook-schedule',
             'post_next_approved_facebook': 'POST /trigger/facebook-posting'
         }
@@ -568,6 +569,23 @@ def lead_collection_dashboard():
 </html>
 """
     return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
+@app.route('/facebook-calendar/status', methods=['GET'])
+def facebook_calendar_status():
+    """Public-safe Facebook content calendar diagnostics without post copy or secrets."""
+    try:
+        return jsonify({
+            'status': 'success',
+            'data': facebook_poster.calendar_status(),
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Facebook calendar status error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 
 @app.route('/trigger/lead-collection', methods=['POST'])

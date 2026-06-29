@@ -146,6 +146,40 @@ class FacebookPoster:
         logger.info(f"Facebook content calendar updated: created={created}")
         return {'created': created, 'worksheet': worksheet.title}
 
+    def calendar_status(self):
+        """Return public-safe metadata about the connected Facebook calendar sheet."""
+        worksheet = self._worksheet()
+        if not worksheet:
+            return {'connected': False, 'worksheet': None}
+
+        values = worksheet.get_all_values()
+        headers = values[0] if values else []
+        rows = self._rows(worksheet)
+        status_counts = {}
+        version_counts = {}
+        scheduled = []
+
+        for row in rows:
+            status = self._status(row)
+            status_counts[status] = status_counts.get(status, 0) + 1
+            version = str(row.get('strategy_version') or 'legacy').strip() or 'legacy'
+            version_counts[version] = version_counts.get(version, 0) + 1
+            scheduled_at = str(row.get('scheduled_at') or '').strip()
+            if scheduled_at:
+                scheduled.append(scheduled_at)
+
+        return {
+            'connected': True,
+            'worksheet': worksheet.title,
+            'row_count': len(rows),
+            'header_count': len(headers),
+            'headers': headers,
+            'status_counts': status_counts,
+            'strategy_version_counts': version_counts,
+            'first_scheduled_at': min(scheduled) if scheduled else None,
+            'last_scheduled_at': max(scheduled) if scheduled else None,
+        }
+
     def post_next_approved(self):
         """Publish the next approved due post, pulling forward an approved replacement if needed."""
         worksheet = self._worksheet()
