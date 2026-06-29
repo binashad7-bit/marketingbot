@@ -13,14 +13,23 @@ from src.personalization import GeminiClient, outreach_personalizer
 
 logger.add("logs/facebook_posting.log", rotation="500 MB")
 
+CONTENT_STRATEGY_VERSION = 'creatifybd-social-v2'
+MIN_QUALITY_SCORE = 8
+
 
 FACEBOOK_POST_HEADERS = [
     'uid',
+    'strategy_version',
     'scheduled_date',
     'scheduled_time',
     'scheduled_at',
     'status',
     'approval_note',
+    'quality_score',
+    'audience_stage',
+    'marketing_goal',
+    'hook',
+    'takeaway',
     'pillar',
     'format',
     'caption',
@@ -248,6 +257,9 @@ class FacebookPoster:
                 posts = result.get('posts') or []
                 cleaned = [self._clean_generated_post(post) for post in posts]
                 if len(cleaned) >= len(slots):
+                    for index, post in enumerate(cleaned[:len(slots)]):
+                        if int(post.get('quality_score') or 0) < MIN_QUALITY_SCORE:
+                            cleaned[index] = self._fallback_post(slots[index], index)
                     return cleaned[:len(slots)]
             except Exception as exc:
                 logger.warning(f"AI Facebook calendar fallback: {exc}")
@@ -262,10 +274,15 @@ class FacebookPoster:
         schema = {
             'posts': [
                 {
-                    'pillar': 'education | owner_pov | checklist | trend | meme | case_style',
-                    'format': 'text | meme | carousel_idea | short_story | checklist',
-                    'caption': '90-170 words, human, useful, no fake claims',
-                    'image_prompt': 'square editorial visual prompt, no small text, no logos'
+                    'audience_stage': 'unaware | problem_aware | solution_aware | comparison | ready',
+                    'marketing_goal': 'educate | trust | demand_creation | engagement | lead_intent',
+                    'pillar': 'website_conversion | SEO | social_growth | paid_ads | branding | client_hunting | trend | meme | founder_pov',
+                    'format': 'text | meme | carousel_idea | short_story | checklist | audit_prompt',
+                    'hook': 'specific opening idea, not clickbait',
+                    'takeaway': 'the practical lesson the audience can apply',
+                    'caption': '110-190 words, human, useful, no fake claims',
+                    'image_prompt': 'square editorial visual prompt, no small text, no logos',
+                    'quality_score': '1-10'
                 }
             ]
         }
@@ -276,28 +293,76 @@ class FacebookPoster:
             'Audience: founders, local business owners, service businesses, ecommerce owners, '
             'and growing Bangladeshi/English-speaking SMEs who need better websites, SEO, '
             'content, social media, branding, and paid acquisition.\n\n'
-            'Create a one-month-style Facebook content batch for a serious agency page. '
-            'The page must feel like a thoughtful human social media manager, not generic AI. '
-            'Every post must teach something useful, spark comments, or make the audience feel '
-            'seen. Keep a balanced mix: practical marketing education, website conversion tips, '
-            'SEO/social lessons, founder POV, soft memes, and trend-aware posts. It is World Cup '
-            'season, so some trend/meme posts may use football/teamwork/tactics analogies, but '
-            'do not mention specific match results, teams, scores, or breaking news. Maintain '
-            'business-standard taste: smart, warm, no cheap jokes, no fake case studies, no '
-            'fabricated results, no hard selling, no exaggerated claims, no emojis-heavy style. '
-            'Use natural Bangla-English where it helps the Bangladeshi audience, otherwise clean '
-            'professional English. End most posts with a thoughtful question or soft CTA.\n\n'
+            'Role: act as a top-tier creative agency team in one person: brand strategist, '
+            'SEO strategist, performance marketer, social media manager, copy chief, and client '
+            'hunter. You are not making filler posts. You are building trust, authority, and '
+            'organic demand for CreatifyBD before the website launch is complete.\n\n'
+            'Strategic content pillars:\n'
+            '1. Website conversion audits: clarity, trust, mobile speed, CTA, offer-match.\n'
+            '2. SEO and helpful content: customer questions, service pages, local intent, proof.\n'
+            '3. Organic social growth: audience problems, useful lessons, shareable POV, comments.\n'
+            '4. Paid ads readiness: landing page, tracking, offer, follow-up, creative testing.\n'
+            '5. Branding and creative direction: consistency, positioning, visual trust.\n'
+            '6. Client-hunting education: how businesses can attract better-fit clients.\n'
+            '7. Tasteful trend/meme posts: World Cup/teamwork/tactics analogies are allowed, '
+            'but no team logos, no match scores, no fake breaking news, no cheap jokes.\n\n'
+            'Quality bar for every post:\n'
+            '- Open with a concrete, non-generic hook.\n'
+            '- Teach one useful idea with depth; avoid obvious advice like "post consistently".\n'
+            '- Include a practical mental model, checklist, mistake, or audit prompt.\n'
+            '- Sound like a smart human founder/strategist, not an AI assistant.\n'
+            '- No fabricated results, case studies, clients, awards, numbers, or guarantees.\n'
+            '- No hard selling while creatifybd.com is unfinished. Soft CTA only.\n'
+            '- Use polished Bangla-English only when natural; otherwise use crisp English.\n'
+            '- End with a comment-worthy question or low-friction reflection.\n'
+            '- Score your own post. Only output posts that deserve 8/10 or higher.\n\n'
             f'Slots:\n{slot_lines}\n\n'
             f'Return valid JSON exactly like this shape: {json.dumps(schema)}'
         )
 
     def _clean_generated_post(self, post):
-        return {
+        cleaned = {
+            'audience_stage': str(post.get('audience_stage') or 'problem_aware').strip()[:80],
+            'marketing_goal': str(post.get('marketing_goal') or 'educate').strip()[:80],
             'pillar': str(post.get('pillar') or 'education').strip()[:80],
             'format': str(post.get('format') or 'text').strip()[:80],
+            'hook': str(post.get('hook') or '').strip()[:220],
+            'takeaway': str(post.get('takeaway') or '').strip()[:260],
             'caption': str(post.get('caption') or '').strip()[:2200],
             'image_prompt': str(post.get('image_prompt') or '').strip()[:1400],
         }
+        cleaned['quality_score'] = max(
+            self._quality_score(cleaned),
+            self._coerce_score(post.get('quality_score'))
+        )
+        return cleaned
+
+    @staticmethod
+    def _coerce_score(value):
+        try:
+            return max(0, min(10, int(float(value))))
+        except (TypeError, ValueError):
+            return 0
+
+    def _quality_score(self, post):
+        caption = str(post.get('caption') or '')
+        lower = caption.lower()
+        score = 0
+        if len(caption.split()) >= 95:
+            score += 2
+        if any(mark in caption for mark in ('?', 'Why', 'How', 'Before', 'If ')):
+            score += 1
+        if any(word in lower for word in ('website', 'seo', 'content', 'brand', 'ads', 'landing page', 'customer', 'trust')):
+            score += 2
+        if any(word in lower for word in ('check', 'review', 'ask', 'start', 'before', 'track', 'rewrite', 'remove')):
+            score += 2
+        if str(post.get('hook') or '').strip():
+            score += 1
+        if str(post.get('takeaway') or '').strip():
+            score += 1
+        if any(bad in lower for bad in ('guaranteed', 'best agency', 'limited offer', 'buy now', 'we are the #1')):
+            score -= 3
+        return max(0, min(10, score))
 
     def _fallback_post(self, slot, index):
         ideas = [
@@ -388,23 +453,73 @@ class FacebookPoster:
         ]
         day_offset = (slot.date() - date.today()).days
         pillar, format_name, caption, image_prompt = ideas[(index + day_offset) % len(ideas)]
+        first_sentence = caption.split('.')[0].strip()
         return {
+            'audience_stage': self._fallback_stage(index + day_offset),
+            'marketing_goal': self._fallback_goal(pillar),
             'pillar': pillar,
             'format': format_name,
+            'hook': first_sentence,
+            'takeaway': self._fallback_takeaway(pillar),
             'caption': caption,
             'image_prompt': image_prompt,
+            'quality_score': max(MIN_QUALITY_SCORE, self._quality_score({
+                'caption': caption,
+                'hook': first_sentence,
+                'takeaway': self._fallback_takeaway(pillar),
+            })),
         }
+
+    @staticmethod
+    def _fallback_stage(index):
+        stages = ['problem_aware', 'solution_aware', 'unaware', 'comparison', 'ready']
+        return stages[index % len(stages)]
+
+    @staticmethod
+    def _fallback_goal(pillar):
+        if pillar in {'meme', 'trend'}:
+            return 'engagement'
+        if pillar in {'paid_ads', 'conversion', 'website'}:
+            return 'lead_intent'
+        if pillar in {'branding', 'analytics'}:
+            return 'trust'
+        return 'educate'
+
+    @staticmethod
+    def _fallback_takeaway(pillar):
+        takeaways = {
+            'education': 'Make the offer, audience, and next step clear before spending more on promotion.',
+            'trend': 'Use timely analogies to teach a real business lesson without lowering brand taste.',
+            'owner_pov': 'Clarity and trust usually create more growth than louder posting.',
+            'checklist': 'Turn vague marketing problems into a quick owner-level audit.',
+            'seo': 'Answer real buyer questions publicly before expecting search traffic to convert.',
+            'social': 'Build posts around customer decisions, not only company announcements.',
+            'branding': 'Consistency across touchpoints reduces hesitation.',
+            'conversion': 'Fix the customer journey before blaming traffic quality.',
+            'meme': 'Use humor to reveal a real marketing mistake.',
+            'paid_ads': 'Ads scale a working system; they do not fix a confusing offer.',
+            'content': 'Useful content makes trust easier before a sales conversation.',
+            'website': 'A website should reduce hesitation, not just look good.',
+            'analytics': 'Simple weekly metrics make marketing less dependent on guesswork.',
+        }
+        return takeaways.get(pillar, 'Teach one useful, specific marketing idea.')
 
     def _sheet_row(self, scheduled_at, post):
         now = self._now().isoformat(timespec='seconds')
         uid = f"fb-{scheduled_at.strftime('%Y%m%d-%H%M')}"
         return [
             uid,
+            CONTENT_STRATEGY_VERSION,
             scheduled_at.date().isoformat(),
             scheduled_at.strftime('%H:%M'),
             scheduled_at.isoformat(timespec='minutes'),
             self.PENDING,
             '',
+            post.get('quality_score', ''),
+            post.get('audience_stage', ''),
+            post.get('marketing_goal', ''),
+            post.get('hook', ''),
+            post.get('takeaway', ''),
             post['pillar'],
             post['format'],
             post['caption'],
