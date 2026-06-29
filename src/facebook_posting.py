@@ -48,7 +48,11 @@ class FacebookPoster:
         self.page_id = Config.FACEBOOK_PAGE_ID
         self.access_token = Config.FACEBOOK_PAGE_ACCESS_TOKEN or Config.FACEBOOK_ACCESS_TOKEN
         self.api_version = "v25.0"
-        self.gemini = GeminiClient()
+        social_keys = Config.GEMINI_API_KEYS[:max(1, Config.FACEBOOK_AI_MAX_KEYS_PER_BATCH)]
+        self.gemini = GeminiClient(
+            api_keys=social_keys,
+            timeout=Config.FACEBOOK_AI_GENERATION_TIMEOUT_SECONDS
+        )
         self.timezone = ZoneInfo(Config.SCHEDULER_TIMEZONE)
 
     def _now(self):
@@ -315,8 +319,75 @@ class FacebookPoster:
                 'Many businesses do not need louder marketing first. They need clearer marketing. Clear service pages, useful posts, visible proof, and fast follow-up can make the same audience respond differently. Growth often starts when a visitor stops guessing and starts trusting. This week, pick one service you sell and rewrite the page from the customer question: "Why should I choose you now?" What would you remove to make that answer clearer?',
                 'Square editorial illustration of a founder simplifying a messy marketing board into a clear customer journey, premium agency style, no text.'
             ),
+            (
+                'checklist',
+                'checklist',
+                'A good service page is not a brochure. It is a decision helper. Start with the problem, show the outcome, explain the process, add trust signals, then make the next step easy. If visitors need to message you just to understand what you offer, the page is doing extra damage quietly. Pick one service today and check: does the page answer price range, timeline, proof, and next step clearly enough?',
+                'Premium square editorial visual of a service page audit checklist beside a laptop and coffee, muted agency colors, clean composition, no readable text.'
+            ),
+            (
+                'seo',
+                'education',
+                'SEO is not only keywords. For local and service businesses, it is clarity plus consistency: clear service pages, useful answers, fast loading, structured information, and proof that real people can trust. The easiest place to start is not a technical hack. Write down the five questions customers ask before buying, then turn each one into a useful page or post. Which customer question have you not answered publicly yet?',
+                'Square editorial image of search results, customer questions, and content blocks arranged on a strategy desk, modern professional style, no text.'
+            ),
+            (
+                'social',
+                'owner_pov',
+                'Most business pages post when they have something to announce. Strong pages post when the audience has something to learn, decide, compare, or feel understood about. That shift changes everything. Instead of asking "What should we post today?", ask "What is our customer trying to figure out this week?" Good content starts there. What is one confusion your customers often have before they contact you?',
+                'Clean square visual of a social media calendar transforming from random posts into customer questions and useful content, no text, editorial style.'
+            ),
+            (
+                'branding',
+                'short_story',
+                'Branding is not just a logo. It is the feeling of consistency across every touchpoint: your website, page posts, replies, offers, visuals, and follow-up. When those pieces feel disconnected, customers hesitate even if the service is good. The fix often starts small: one clear message, one visual direction, one consistent tone. If someone saw your website and Facebook page side by side, would they feel the same brand?',
+                'Square editorial brand board with website, social post, color swatches, and customer message cards, refined agency aesthetic, no logos.'
+            ),
+            (
+                'conversion',
+                'education',
+                'Traffic is expensive. Confusion is more expensive. If people visit your website but do not enquire, check the basics before blaming ads: mobile speed, headline clarity, proof, offer match, and a simple contact path. A beautiful page that makes people think too hard is still leaking opportunity. What is the one action your website should make easiest for a serious buyer?',
+                'Modern square visual showing a leaky funnel being repaired with clarity, proof, speed, and CTA elements, professional and minimal, no text.'
+            ),
+            (
+                'trend',
+                'meme',
+                'World Cup tactics and marketing have one thing in common: random energy rarely beats a clear system. A post can get attention, but the full play matters: who you target, what you promise, where you send them, and how fast you follow up. Before chasing the next trend, check your formation. Are your website, content, ads, and inbox working as one team?',
+                'Tasteful football strategy board blended with marketing channels, website and content icons, no team branding, premium square editorial look.'
+            ),
+            (
+                'meme',
+                'meme',
+                'That moment when a business boosts a post, gets clicks, and then sends people to a page that does not explain the offer clearly. The ad did its job. The landing page did not. Growth is usually a chain, not a single action. Before spending more, strengthen the weakest link. Is your landing page ready for the attention you are paying for?',
+                'Smart business meme-style square image: ad clicks flowing toward a messy landing page being organized, tasteful humor, no captions or small text.'
+            ),
+            (
+                'paid_ads',
+                'checklist',
+                'Before running ads, ask five questions: Is the offer specific? Is the audience narrow enough? Does the landing page match the promise? Is there proof? Who follows up and how quickly? Skipping these makes ad spend look like the problem when the real issue is the system around it. Paid ads can scale clarity. They cannot rescue confusion.',
+                'Square editorial visual of a paid ads launch checklist with campaign, landing page, proof, and follow-up cards, clean professional style, no text.'
+            ),
+            (
+                'content',
+                'education',
+                'Helpful content does not need to be complicated. Teach one useful thing. Share one mistake to avoid. Explain one decision. Show one behind-the-scenes process. The goal is not to sound big. The goal is to become easier to trust before the customer speaks to you. What is one small lesson from your work that your audience would genuinely benefit from?',
+                'Warm square editorial image of a founder turning expertise into simple content cards, modern workspace, natural light, no readable text.'
+            ),
+            (
+                'website',
+                'owner_pov',
+                'Your website is often your first salesperson. It works silently, all day, for people who may never message if the first impression feels unclear. That is why copy, structure, speed, and trust matter as much as design. A strong site does not just look professional. It reduces hesitation. What would a first-time visitor trust more after spending 30 seconds on your homepage?',
+                'Square visual of a website acting like a calm professional salesperson, laptop with structured page sections, polished editorial style, no text.'
+            ),
+            (
+                'analytics',
+                'checklist',
+                'Marketing without measurement becomes guesswork. You do not need a complex dashboard to start. Track where leads come from, which posts create conversations, which pages get visits, and how many enquiries become real opportunities. Once you see the pattern, better decisions become easier. What is one number your business should check every week but currently ignores?',
+                'Minimal square analytics desk scene with simple charts, leads, content, and enquiry cards, sophisticated agency visual, no small text.'
+            ),
         ]
-        pillar, format_name, caption, image_prompt = ideas[index % len(ideas)]
+        day_offset = (slot.date() - date.today()).days
+        pillar, format_name, caption, image_prompt = ideas[(index + day_offset) % len(ideas)]
         return {
             'pillar': pillar,
             'format': format_name,
