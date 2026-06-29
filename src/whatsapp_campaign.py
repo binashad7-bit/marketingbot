@@ -2,6 +2,7 @@ from twilio.rest import Client
 from datetime import datetime
 from loguru import logger
 from config import Config
+from src.personalization import outreach_personalizer
 from src.database import (
     Lead, update_lead_status, log_whatsapp_event, db, normalize_bd_phone
 )
@@ -155,6 +156,16 @@ class WhatsAppCampaign:
     
     def _create_message(self, lead):
         """লিডের ধরন অনুযায়ী মেসেজ তৈরি করা"""
+        ai_copy = outreach_personalizer.create(lead)
+        if ai_copy:
+            return ai_copy['whatsapp_message']
+
+        return (
+            f"Hi, this is CreatifyBD. I came across {lead.school_name or 'your business'} "
+            "and thought there may be a useful digital growth opportunity around your website, "
+            "search visibility, or social presence. May I send a short, no-obligation review? "
+            "If this is not relevant, just let me know and I will not follow up."
+        )
         
         messages = {
             'hot': f"""নমস্কার! 👋

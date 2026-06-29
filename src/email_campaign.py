@@ -5,9 +5,10 @@ from datetime import datetime, timedelta
 from loguru import logger
 from config import Config
 from src.database import (
-    Lead, get_leads_by_segment, update_lead_status,
+    EmailLog, Lead, get_leads_by_segment, update_lead_status,
     log_email_event, log_followup_event, db
 )
+from src.personalization import outreach_personalizer
 import os
 
 logger.add("logs/email_campaign.log", rotation="500 MB")
@@ -47,15 +48,54 @@ class EmailCampaign:
 
         # ফলো-আপ ড্রিপ সিকোয়েন্স: {current_send_count: (days_gap, template, subject)}
         self.followup_sequence = {
-            1: (2, 'followup_second', 'মনে করিয়ে দিচ্ছি — {school}'),
-            2: (4, 'followup_video', '৫ মিনিটের ভিডিও ডেমো — {school}'),
-            3: (6, 'objection_price', 'PathshalaPro মূল্য তুলনা — {school}'),
-            4: (8, 'final_offer', 'শেষ সুযোগ: ৫০% ছাড় — {school}'),
+            1: (3, 'followup_second', 'A quick follow-up for {school}'),
+            2: (5, 'followup_value', 'One practical growth idea for {school}'),
+            3: (7, 'final_followup', 'Should I close the loop, {school}?'),
         }
     
     
     def _load_templates(self):
         """ইমেইল টেমপ্লেট লোড করা"""
+        first_touch = '''Hi [SCHOOL_NAME] team,
+
+I am reaching out from CreatifyBD. We help businesses improve their websites, search visibility, social media, creative content, and paid acquisition.
+
+Your business looked relevant to the work we do. If growth or a stronger digital presence is a priority, I would be happy to prepare a short, no-obligation review with a few practical ideas specific to [SCHOOL_NAME].
+
+Would that be useful?
+
+Best,
+CreatifyBD
+https://creatifybd.com'''
+        return {
+            'hot_first': first_touch,
+            'warm_first': first_touch,
+            'cold_first': first_touch,
+            'followup_second': '''Hi [SCHOOL_NAME] team,
+
+Just following up on my earlier note. I can send a concise review focused on the most useful digital growth opportunity I can identify for your business.
+
+Would you like me to prepare it?
+
+Best,
+CreatifyBD''',
+            'followup_value': '''Hi [SCHOOL_NAME] team,
+
+One practical place we often find growth opportunities is the path from discovery to enquiry: search visibility, landing-page clarity, trust signals, and follow-up.
+
+I can review that path for [SCHOOL_NAME] and send the clearest improvement opportunities. Interested?
+
+Best,
+CreatifyBD''',
+            'final_followup': '''Hi [SCHOOL_NAME] team,
+
+I do not want to crowd your inbox, so this will be my last note. If a short digital growth review would be useful later, you can reach us at marketing@creatifybd.com.
+
+Best,
+CreatifyBD'''
+        }
+
+        # Legacy templates are retained below only for migration history.
         templates = {
             'hot_first': '''
 প্রিয় [SCHOOL_NAME] এর অধ্যক্ষ/ম্যানেজার,
@@ -319,6 +359,16 @@ PathshalaPro টিম
         logger.info("=" * 50)
         
         try:
+            day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            sent_today = EmailLog.query.filter(
+                EmailLog.status == 'sent',
+                EmailLog.sent_at >= day_start
+            ).count()
+            daily_remaining = max(0, Config.EMAIL_DAILY_LIMIT - sent_today)
+            if daily_remaining == 0:
+                logger.info(f"Daily email limit reached: {Config.EMAIL_DAILY_LIMIT}")
+                return 0
+
             # লিড স্কোর অনুযায়ী সংগ্রহ করা
             hot_leads = get_leads_by_segment('Hot')
             warm_leads = get_leads_by_segment('Warm')
@@ -329,13 +379,14 @@ PathshalaPro টিম
             # Hot লিডদের প্রথম ইমেইল পাঠানো
             logger.info(f"Hot লিড পাঠাচ্ছি: {len(hot_leads)}")
             for lead in hot_leads:
+                if total_sent >= daily_remaining:
+                    break
                 if lead.email and not lead.email_sent:
-                    html_content = self._personalize_template(
-                        self.templates['hot_first'], 
-                        lead
+                    ai_copy = outreach_personalizer.create(lead)
+                    html_content = ai_copy['email_body'] if ai_copy else self._personalize_template(
+                        self.templates['hot_first'], lead
                     )
-                    
-                    subject = f"{lead.school_name} এর জন্য বিশেষ অফার 🎁"
+                    subject = ai_copy['subject'] if ai_copy else f"A growth idea for {lead.school_name}"
                     
                     if self.send_email(
                         lead.email, 
@@ -356,13 +407,14 @@ PathshalaPro টিম
             # Warm লিডদের মধ্যম ইমেইল
             logger.info(f"Warm লিড পাঠাচ্ছি: {len(warm_leads)}")
             for lead in warm_leads:
+                if total_sent >= daily_remaining:
+                    break
                 if lead.email and not lead.email_sent:
-                    html_content = self._personalize_template(
-                        self.templates['warm_first'], 
-                        lead
+                    ai_copy = outreach_personalizer.create(lead)
+                    html_content = ai_copy['email_body'] if ai_copy else self._personalize_template(
+                        self.templates['warm_first'], lead
                     )
-                    
-                    subject = f"{lead.school_name} - স্কুল ম্যানেজমেন্ট সলিউশন"
+                    subject = ai_copy['subject'] if ai_copy else f"A digital growth review for {lead.school_name}"
                     
                     if self.send_email(
                         lead.email, 
@@ -383,13 +435,14 @@ PathshalaPro টিম
             # Cold লিডদের সফট ইমেইল
             logger.info(f"Cold লিড পাঠাচ্ছি: {len(cold_leads)}")
             for lead in cold_leads:
+                if total_sent >= daily_remaining:
+                    break
                 if lead.email and not lead.email_sent:
-                    html_content = self._personalize_template(
-                        self.templates['cold_first'], 
-                        lead
+                    ai_copy = outreach_personalizer.create(lead)
+                    html_content = ai_copy['email_body'] if ai_copy else self._personalize_template(
+                        self.templates['cold_first'], lead
                     )
-                    
-                    subject = f"{lead.school_name} - বিনামূল্যে ডেমো"
+                    subject = ai_copy['subject'] if ai_copy else f"A quick idea for {lead.school_name}"
                     
                     if self.send_email(
                         lead.email, 

@@ -3,6 +3,7 @@ from datetime import datetime
 from loguru import logger
 from config import Config
 from src.database import db
+from src.personalization import outreach_personalizer
 import json
 import os
 
@@ -15,7 +16,7 @@ class FacebookPoster:
     def __init__(self):
         self.page_id = Config.FACEBOOK_PAGE_ID
         self.access_token = Config.FACEBOOK_PAGE_ACCESS_TOKEN
-        self.api_version = "v18.0"
+        self.api_version = "v25.0"
     
     
     def post_to_facebook(self, content_text, image_url=None):
@@ -176,6 +177,13 @@ class FacebookPoster:
                 logger.error("দৈনিক পোস্ট ব্যর্থ (Sheet)")
             return success
 
+        ai_post = outreach_personalizer.create_facebook_post()
+        if ai_post:
+            success, post_id = self.post_to_facebook(ai_post['content'])
+            if success:
+                logger.info("AI-generated daily Facebook post completed")
+            return success
+
         day_of_week = datetime.now().strftime("%A").lower()
         
         daily_content = {
@@ -220,6 +228,38 @@ PathshalaPro সব সমাধান করে দেয়!
 আপনার প্রতিষ্ঠানকে ডিজিটালাইজ করুন।
 
 https://pathshalapro.net'''
+        }
+
+        daily_content = {
+            'monday': '''A strong website does more than look polished. It should make the next step obvious.
+
+Clear positioning, relevant proof, fast mobile performance, and one focused call to action can turn passive visits into real enquiries.
+
+CreatifyBD builds digital experiences around business outcomes, not decoration.
+
+https://creatifybd.com''',
+            'wednesday': '''Organic growth gets easier when content answers real customer questions.
+
+Start with the questions buyers ask before contacting you. Turn each answer into a useful post, a focused service page, and a reason to trust your expertise.
+
+Consistency matters. Relevance matters more.
+
+https://creatifybd.com''',
+            'friday': '''Before increasing ad spend, review the full journey:
+
+1. Is the offer immediately clear?
+2. Does the landing page match the ad promise?
+3. Are trust signals visible?
+4. Is follow-up fast and useful?
+
+Better systems usually outperform louder campaigns.
+
+https://creatifybd.com''',
+            'default': '''Good marketing connects strategy, creative work, distribution, and measurement.
+
+CreatifyBD helps businesses strengthen that system through websites, SEO, social media, branding, content, and paid acquisition.
+
+https://creatifybd.com'''
         }
         
         content = daily_content.get(day_of_week, daily_content['default'])

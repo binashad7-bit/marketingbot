@@ -23,6 +23,17 @@ def _csv_list_env(name, default_values):
     return [item.strip() for item in raw.split(',') if item.strip()]
 
 
+def _gemini_api_keys():
+    """Collect Gemini keys from common names without logging secret values."""
+    candidates = _csv_list_env('GEMINI_API_KEYS', [])
+    candidates.extend([
+        os.getenv('GEMINI_API_KEY'),
+        os.getenv('GOOGLE_API_KEY'),
+    ])
+    candidates.extend(os.getenv(f'GOOGLE_API_KEY{index}') for index in range(1, 21))
+    return list(dict.fromkeys(key.strip() for key in candidates if key and key.strip()))
+
+
 BANGLADESH_DISTRICTS = [
     'Dhaka', 'Faridpur', 'Gazipur', 'Gopalganj', 'Kishoreganj', 'Madaripur',
     'Manikganj', 'Munshiganj', 'Narayanganj', 'Narsingdi', 'Rajbari',
@@ -70,6 +81,23 @@ class Config:
     TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
     HUNTER_API_KEY = os.getenv('HUNTER_API_KEY')
     EMAIL_FINDER_PROVIDER = os.getenv('EMAIL_FINDER_PROVIDER', 'website').lower()
+
+    # AI personalization. Multiple keys are rotated automatically on quota errors.
+    GEMINI_API_KEYS = _gemini_api_keys()
+    GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+    GEMINI_TIMEOUT_SECONDS = int(os.getenv('GEMINI_TIMEOUT_SECONDS', 30))
+    ENABLE_AI_PERSONALIZATION = os.getenv(
+        'ENABLE_AI_PERSONALIZATION',
+        'true' if GEMINI_API_KEYS else 'false'
+    ).lower() == 'true'
+    LEAD_RESEARCH_MAX_PAGES = int(os.getenv('LEAD_RESEARCH_MAX_PAGES', 3))
+    LEAD_RESEARCH_MAX_CHARS = int(os.getenv('LEAD_RESEARCH_MAX_CHARS', 12000))
+    AGENCY_NAME = os.getenv('AGENCY_NAME', 'CreatifyBD')
+    AGENCY_WEBSITE = os.getenv('AGENCY_WEBSITE', 'https://creatifybd.com')
+    AGENCY_SERVICES = os.getenv(
+        'AGENCY_SERVICES',
+        'website design and development, SEO, social media marketing, branding and creative design, content, paid advertising'
+    )
     
     # Facebook
     FACEBOOK_PAGE_ID = os.getenv('FACEBOOK_PAGE_ID')
@@ -86,6 +114,7 @@ class Config:
     EMAIL_PROVIDER = os.getenv('EMAIL_PROVIDER', 'brevo').lower()
     FROM_EMAIL = os.getenv('FROM_EMAIL', 'marketing@pathshalapro.net')
     FROM_NAME = os.getenv('FROM_NAME', 'PathshalaPro Marketing Team')
+    EMAIL_DAILY_LIMIT = int(os.getenv('EMAIL_DAILY_LIMIT', 300))
     
     # WhatsApp Settings
     WHATSAPP_PROVIDER = os.getenv('WHATSAPP_PROVIDER', 'twilio').lower()
