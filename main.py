@@ -238,17 +238,36 @@ def init_scheduler():
         engagement = Config.SCHEDULE_CONFIG.get('engagement', {})
         tracking_cfg = Config.SCHEDULE_CONFIG.get('tracking', {})
 
-        hour, minute = _parse_hhmm(engagement.get('email_campaign'), 10, 30)
-        add_cron_job('email_campaign', 'Email campaign', email_campaign.run_campaign, hour, minute)
+        if Config.ENABLE_EMAIL_CAMPAIGN:
+            hour, minute = _parse_hhmm(engagement.get('email_campaign'), 10, 30)
+            add_cron_job('email_campaign', 'Email campaign', email_campaign.run_campaign, hour, minute)
 
-        hour, minute = _parse_hhmm(engagement.get('whatsapp_campaign'), 12, 30)
-        add_cron_job('whatsapp_campaign', 'WhatsApp campaign', whatsapp_campaign.send_campaign, hour, minute)
+        if Config.ENABLE_WHATSAPP_CAMPAIGN:
+            hour, minute = _parse_hhmm(engagement.get('whatsapp_campaign'), 12, 30)
+            add_cron_job('whatsapp_campaign', 'WhatsApp campaign', whatsapp_campaign.send_campaign, hour, minute)
 
-        hour, minute = _parse_hhmm(engagement.get('email_followups'), 16, 0)
-        add_cron_job('email_followups', 'Email follow-up drip', email_campaign.run_followups, hour, minute)
+        if Config.ENABLE_EMAIL_FOLLOWUPS:
+            hour, minute = _parse_hhmm(engagement.get('email_followups'), 16, 0)
+            add_cron_job('email_followups', 'Email follow-up drip', email_campaign.run_followups, hour, minute)
 
-        hour, minute = _parse_hhmm(engagement.get('facebook_posting'), 14, 0)
-        add_cron_job('facebook_posting', 'Facebook posting', facebook_poster.post_daily_content, hour, minute)
+        if Config.ENABLE_FACEBOOK_POSTING:
+            add_interval_job(
+                'facebook_schedule_generation',
+                'Generate approval-gated Facebook content calendar',
+                facebook_poster.ensure_content_calendar,
+                360,
+                first_run_delay_minutes=2
+            )
+            post_times = Config.FACEBOOK_POST_TIMES[:Config.FACEBOOK_POSTS_PER_DAY]
+            for index, post_time in enumerate(post_times, start=1):
+                hour, minute = _parse_hhmm(post_time, 14, 0)
+                add_cron_job(
+                    f'facebook_posting_{index}',
+                    f'Facebook approved post slot {index}',
+                    facebook_poster.post_next_approved,
+                    hour,
+                    minute
+                )
 
         hour, minute = _parse_hhmm(tracking_cfg.get('email_tracking'), 20, 0)
         add_cron_job('tracking', 'Tracking and metrics', tracking_manager.run_all, hour, minute)
@@ -287,7 +306,9 @@ def index():
             'usa_local_business_bulk_collection': 'POST /trigger/usa-local-business-bulk-collection',
             'sync_leads_to_sheets': 'POST /trigger/sync-leads-to-sheets',
             'enrich_contact_info': 'POST /trigger/enrich-contact-info',
-            'find_emails': 'POST /trigger/find-emails'
+            'find_emails': 'POST /trigger/find-emails',
+            'generate_facebook_schedule': 'POST /trigger/generate-facebook-schedule',
+            'post_next_approved_facebook': 'POST /trigger/facebook-posting'
         }
     }), 200
 
@@ -775,7 +796,7 @@ def trigger_whatsapp_campaign():
 def trigger_facebook_posting():
     """ম্যানুয়ালি ফেসবুক পোস্টিং ট্রিগার করা"""
     try:
-        result = facebook_poster.post_daily_content()
+        result = facebook_poster.post_next_approved()
         return jsonify({
             'status': 'success',
             'message': 'ফেসবুকে পোস্ট করা হয়েছে' if result else 'পোস্টিং ব্যর্থ',
@@ -783,6 +804,28 @@ def trigger_facebook_posting():
         }), 200
     except Exception as e:
         logger.error(f"Facebook trigger error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/trigger/generate-facebook-schedule', methods=['POST'])
+@require_admin
+def trigger_generate_facebook_schedule():
+    """Generate or top up the approval-gated Facebook content calendar."""
+    try:
+        payload = request.json if request.is_json else {}
+        result = facebook_poster.ensure_content_calendar(
+            horizon_days=payload.get('horizon_days', Config.FACEBOOK_CONTENT_HORIZON_DAYS)
+        )
+        return jsonify({
+            'status': 'success',
+            'data': result,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Facebook schedule generation error: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)

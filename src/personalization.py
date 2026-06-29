@@ -81,6 +81,52 @@ class GeminiClient:
 
         raise RuntimeError(f'All Gemini keys failed: {last_error}')
 
+    def generate_image(self, prompt, aspect_ratio='1:1'):
+        """Generate one image and return raw bytes plus mime type.
+
+        The response shape for image-generation models can vary, so this parser
+        walks the JSON tree and accepts the first inline image payload it finds.
+        """
+        if not self.available:
+            raise RuntimeError('No Gemini API keys configured')
+
+        url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
+        payload = {
+            'model': Config.GEMINI_IMAGE_MODEL,
+            'input': [{'type': 'text', 'text': prompt}],
+            'response_format': {
+                'type': 'image',
+                'mime_type': 'image/jpeg',
+                'aspect_ratio': aspect_ratio,
+                'image_size': '1K'
+            },
+            'generation_config': {
+                'thinking_level': 'minimal'
+            }
+        }
+
+        last_error = None
+        for key in self._ordered_keys():
+            try:
+                response = self.session.post(
+                    url,
+                    headers={'x-goog-api-key': key, 'Content-Type': 'application/json'},
+                    json=payload,
+                    timeout=max(self.timeout, 60)
+                )
+                if response.status_code in (401, 403, 429) or response.status_code >= 500:
+                    last_error = RuntimeError(f'Gemini image HTTP {response.status_code}')
+                    continue
+                response.raise_for_status()
+                image = self._find_inline_image(response.json())
+                if image:
+                    return image
+                raise ValueError('No inline image returned by Gemini')
+            except (ValueError, requests.RequestException) as exc:
+                last_error = exc
+
+        raise RuntimeError(f'All Gemini image keys failed: {last_error}')
+
     @staticmethod
     def _parse_json(text):
         cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip(), flags=re.I)
@@ -88,6 +134,33 @@ class GeminiClient:
         if not isinstance(value, dict):
             raise ValueError('Gemini response must be a JSON object')
         return value
+
+    @classmethod
+    def _find_inline_image(cls, value):
+        import base64
+
+        if isinstance(value, dict):
+            for key in ('inlineData', 'inline_data', 'image', 'output_image'):
+                item = value.get(key)
+                if isinstance(item, dict):
+                    data = item.get('data') or item.get('bytes') or item.get('b64_json')
+                    mime_type = item.get('mimeType') or item.get('mime_type') or 'image/png'
+                    if data:
+                        return base64.b64decode(data), mime_type
+            data = value.get('data') or value.get('bytes') or value.get('b64_json')
+            mime_type = value.get('mimeType') or value.get('mime_type')
+            if data and mime_type and str(mime_type).startswith('image/'):
+                return base64.b64decode(data), mime_type
+            for item in value.values():
+                found = cls._find_inline_image(item)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = cls._find_inline_image(item)
+                if found:
+                    return found
+        return None
 
 
 class LeadResearcher:

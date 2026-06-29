@@ -85,6 +85,7 @@ class Config:
     # AI personalization. Multiple keys are rotated automatically on quota errors.
     GEMINI_API_KEYS = _gemini_api_keys()
     GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+    GEMINI_IMAGE_MODEL = os.getenv('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image')
     GEMINI_TIMEOUT_SECONDS = int(os.getenv('GEMINI_TIMEOUT_SECONDS', 30))
     ENABLE_AI_PERSONALIZATION = os.getenv(
         'ENABLE_AI_PERSONALIZATION',
@@ -143,6 +144,10 @@ class Config:
         'ENABLE_BD_EDUCATION_COLLECTION', 'false'
     ).lower() == 'true'
     ENABLE_MARKETING_JOBS = os.getenv('ENABLE_MARKETING_JOBS', 'true').lower() == 'true'
+    ENABLE_EMAIL_CAMPAIGN = os.getenv('ENABLE_EMAIL_CAMPAIGN', 'false').lower() == 'true'
+    ENABLE_EMAIL_FOLLOWUPS = os.getenv('ENABLE_EMAIL_FOLLOWUPS', 'false').lower() == 'true'
+    ENABLE_WHATSAPP_CAMPAIGN = os.getenv('ENABLE_WHATSAPP_CAMPAIGN', 'false').lower() == 'true'
+    ENABLE_FACEBOOK_POSTING = os.getenv('ENABLE_FACEBOOK_POSTING', 'true').lower() == 'true'
     ENABLE_REPORTING_JOBS = os.getenv('ENABLE_REPORTING_JOBS', 'true').lower() == 'true'
     LEAD_COLLECTION_DISTRICTS = _csv_list_env('LEAD_COLLECTION_DISTRICTS', BANGLADESH_DISTRICTS)
     LEAD_COLLECTION_KEYWORDS = _csv_list_env('LEAD_COLLECTION_KEYWORDS', INSTITUTE_KEYWORDS)
@@ -191,6 +196,19 @@ class Config:
     USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN = int(os.getenv('USA_LOCAL_BUSINESS_LOCATIONS_PER_RUN', 6))
     USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION = int(os.getenv('USA_LOCAL_BUSINESS_RESULTS_PER_LOCATION', 200))
     USA_LOCAL_BUSINESS_INTERVAL_MINUTES = int(os.getenv('USA_LOCAL_BUSINESS_INTERVAL_MINUTES', 60))
+
+    # Social media manager settings. Outreach is approval-gated: scheduled
+    # Facebook posts must be marked Approved in Google Sheets before publishing.
+    FACEBOOK_POSTS_WORKSHEET = os.getenv('FACEBOOK_POSTS_WORKSHEET', 'FacebookPosts')
+    FACEBOOK_POSTS_PER_DAY = int(os.getenv('FACEBOOK_POSTS_PER_DAY', 3))
+    FACEBOOK_POST_TIMES = _csv_list_env(
+        'FACEBOOK_POST_TIMES',
+        ['10:00', '14:30', '20:30']
+    )
+    FACEBOOK_CONTENT_HORIZON_DAYS = int(os.getenv('FACEBOOK_CONTENT_HORIZON_DAYS', 30))
+    FACEBOOK_CONTENT_BATCH_DAYS = int(os.getenv('FACEBOOK_CONTENT_BATCH_DAYS', 7))
+    FACEBOOK_REQUIRE_APPROVAL = os.getenv('FACEBOOK_REQUIRE_APPROVAL', 'true').lower() == 'true'
+    FACEBOOK_GENERATE_IMAGES = os.getenv('FACEBOOK_GENERATE_IMAGES', 'true').lower() == 'true'
     
     # Schedule Configuration
     SCHEDULE_CONFIG = {
