@@ -275,6 +275,17 @@ def init_scheduler():
                 hour,
                 minute
             )
+        if Config.FACEBOOK_TEST_POST_ON_DEPLOY:
+            scheduler.add_job(
+                func=run_scheduled_job,
+                args=['facebook_test_post_once', facebook_poster.post_autonomous_test_once],
+                trigger="date",
+                run_date=datetime.now(scheduler.timezone) + timedelta(minutes=3),
+                id='facebook_test_post_once',
+                name='Post one autonomous Facebook test post',
+                max_instances=1,
+                misfire_grace_time=900
+            )
 
     if reporting_enabled:
         reporting_cfg = Config.SCHEDULE_CONFIG.get('reporting', {})

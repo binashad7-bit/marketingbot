@@ -13,8 +13,9 @@ from src.personalization import GeminiClient, outreach_personalizer
 
 logger.add("logs/facebook_posting.log", rotation="500 MB")
 
-CONTENT_STRATEGY_VERSION = 'creatifybd-social-v2'
+CONTENT_STRATEGY_VERSION = 'creatifybd-autonomous-v3'
 MIN_QUALITY_SCORE = 8
+TEST_POST_UID = 'fb-autonomous-test-v1'
 
 
 FACEBOOK_POST_HEADERS = [
@@ -104,7 +105,7 @@ class FacebookPoster:
         return rows
 
     def ensure_content_calendar(self, horizon_days=None):
-        """Keep a 30-day, three-post-per-day approval calendar in Google Sheets."""
+        """Keep a 30-day autonomous content calendar in Google Sheets."""
         worksheet = self._worksheet()
         if not worksheet:
             return {'created': 0, 'worksheet': None}
@@ -112,20 +113,22 @@ class FacebookPoster:
         horizon_days = horizon_days or Config.FACEBOOK_CONTENT_HORIZON_DAYS
         now = self._now()
         end_date = now.date() + timedelta(days=horizon_days - 1)
+        existing_rows = self._rows(worksheet)
+        if self._should_reset_calendar(existing_rows):
+            worksheet.clear()
+            worksheet.append_row(FACEBOOK_POST_HEADERS)
+            existing_rows = []
+
         existing = {
             str(row.get('scheduled_at', '')).strip()
-            for row in self._rows(worksheet)
+            for row in existing_rows
             if str(row.get('scheduled_at', '')).strip()
         }
 
-        slots = []
-        current = now.date()
-        while current <= end_date:
-            for post_time in Config.FACEBOOK_POST_TIMES[:Config.FACEBOOK_POSTS_PER_DAY]:
-                scheduled_at = self._combine(current, post_time)
-                if scheduled_at.isoformat(timespec='minutes') not in existing:
-                    slots.append(scheduled_at)
-            current += timedelta(days=1)
+        slots = [
+            scheduled_at for scheduled_at in self._planned_slots(now.date(), end_date)
+            if scheduled_at.isoformat(timespec='minutes') not in existing
+        ]
 
         if not slots:
             return {'created': 0, 'worksheet': worksheet.title}
@@ -176,12 +179,14 @@ class FacebookPoster:
             'headers': headers,
             'status_counts': status_counts,
             'strategy_version_counts': version_counts,
+            'autonomous_mode': Config.FACEBOOK_AUTONOMOUS_MODE,
+            'approval_required': Config.FACEBOOK_REQUIRE_APPROVAL and not Config.FACEBOOK_AUTONOMOUS_MODE,
             'first_scheduled_at': min(scheduled) if scheduled else None,
             'last_scheduled_at': max(scheduled) if scheduled else None,
         }
 
     def post_next_approved(self):
-        """Publish the next approved due post, pulling forward an approved replacement if needed."""
+        """Publish the next due post, approval-gated or autonomous depending on config."""
         worksheet = self._worksheet()
         if not worksheet:
             return False
@@ -190,9 +195,9 @@ class FacebookPoster:
         rows = self._rows(worksheet)
         now = self._now()
 
-        candidate = self._first_approved_due(rows, now)
+        candidate = self._first_publishable_due(rows, now)
         replacement_for = ''
-        if not candidate and self._has_blocked_due_slot(rows, now):
+        if not Config.FACEBOOK_AUTONOMOUS_MODE and not candidate and self._has_blocked_due_slot(rows, now):
             candidate = self._first_future_approved(rows, now)
             if candidate:
                 replacement_for = self._blocked_due_uid(rows, now)
@@ -202,6 +207,29 @@ class FacebookPoster:
             return False
 
         return self._publish_sheet_row(worksheet, candidate, replacement_for=replacement_for)
+
+    def post_autonomous_test_once(self):
+        """Publish one owner-approved test post and record it in the calendar sheet."""
+        worksheet = self._worksheet()
+        if not worksheet:
+            return {'posted': False, 'reason': 'sheet unavailable'}
+
+        rows = self._rows(worksheet)
+        existing = next((row for row in rows if str(row.get('uid') or '') == TEST_POST_UID), None)
+        if existing:
+            return {'posted': False, 'reason': 'test already recorded', 'status': self._status(existing)}
+
+        now = self._now()
+        post = self._test_post()
+        row_values = self._sheet_row(now, post)
+        row_values[0] = TEST_POST_UID
+        row_values[4] = now.isoformat(timespec='minutes')
+        row_values[5] = self.APPROVED if not Config.FACEBOOK_AUTONOMOUS_MODE else self.PENDING
+        worksheet.append_row(row_values, value_input_option='USER_ENTERED')
+        row = {'row_number': len(self._rows(worksheet)) + 1}
+        row.update(dict(zip(FACEBOOK_POST_HEADERS, row_values)))
+        success = self._publish_sheet_row(worksheet, row)
+        return {'posted': bool(success), 'uid': TEST_POST_UID}
 
     def post_daily_content(self):
         """Backward-compatible entrypoint used by older scheduler/manual triggers."""
@@ -370,6 +398,70 @@ class FacebookPoster:
             self._coerce_score(post.get('quality_score'))
         )
         return cleaned
+
+    def _should_reset_calendar(self, rows):
+        if not rows:
+            return False
+        posted_or_approved = {
+            self.POSTED.lower(),
+            self.APPROVED.lower(),
+        }
+        has_committed_rows = any(self._status(row).lower() in posted_or_approved for row in rows)
+        if has_committed_rows:
+            return False
+        return any(str(row.get('strategy_version') or '') != CONTENT_STRATEGY_VERSION for row in rows)
+
+    def _planned_slots(self, start_date, end_date):
+        slots = []
+        current = start_date
+        while current <= end_date:
+            for post_time in self._autonomous_post_times(current):
+                slots.append(self._combine(current, post_time))
+            current += timedelta(days=1)
+        return slots
+
+    def _autonomous_post_times(self, day):
+        if not Config.FACEBOOK_AUTONOMOUS_MODE:
+            return Config.FACEBOOK_POST_TIMES[:Config.FACEBOOK_POSTS_PER_DAY]
+
+        # Owner-level rhythm: publish more on high-attention weekdays, stay lighter
+        # on Friday/weekends, and keep posts away from cramped back-to-back windows.
+        weekday = day.weekday()
+        if weekday in (1, 3):  # Tuesday, Thursday
+            return ['09:40', '13:15', '17:40', '21:05']
+        if weekday in (0, 2):  # Monday, Wednesday
+            return ['10:10', '15:10', '20:35']
+        if weekday == 4:  # Friday
+            return ['11:00', '20:45']
+        if weekday == 5:  # Saturday
+            return ['12:15', '19:45']
+        return ['10:45', '16:30', '21:00']
+
+    def _test_post(self):
+        caption = (
+            "A strong digital presence does not start with posting more. It starts with making "
+            "the business easier to understand, trust, and contact.\n\n"
+            "Before any campaign, look at the full path: what the customer sees first, what they "
+            "believe, what question stays unanswered, and how easy the next step feels on mobile.\n\n"
+            "CreatifyBD is being built around that kind of practical growth thinking: websites, "
+            "SEO, content, branding, social media, and paid acquisition working as one system.\n\n"
+            "If you had to improve only one part of your digital presence this week, what would it be?"
+        )
+        return {
+            'audience_stage': 'problem_aware',
+            'marketing_goal': 'trust',
+            'pillar': 'founder_pov',
+            'format': 'text',
+            'hook': 'A strong digital presence does not start with posting more',
+            'takeaway': 'Fix clarity, trust, and next-step friction before scaling promotion.',
+            'caption': caption,
+            'image_prompt': (
+                'Premium square editorial visual of a founder mapping a customer journey across '
+                'website, SEO, content, brand, social media, and ads; warm modern agency style; '
+                'no logos, no small text.'
+            ),
+            'quality_score': 9,
+        }
 
     @staticmethod
     def _coerce_score(value):
@@ -599,6 +691,17 @@ class FacebookPoster:
         candidates = [
             row for row in rows
             if self._status(row) == self.APPROVED and self._parse_scheduled_at(row) <= now
+        ]
+        return sorted(candidates, key=self._parse_scheduled_at)[0] if candidates else None
+
+    def _first_publishable_due(self, rows, now):
+        if not Config.FACEBOOK_AUTONOMOUS_MODE:
+            return self._first_approved_due(rows, now)
+        candidates = [
+            row for row in rows
+            if self._status(row) in {self.PENDING, self.APPROVED}
+            and self._parse_scheduled_at(row) <= now
+            and int(row.get('quality_score') or 0) >= MIN_QUALITY_SCORE
         ]
         return sorted(candidates, key=self._parse_scheduled_at)[0] if candidates else None
 

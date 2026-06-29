@@ -207,10 +207,12 @@ class Config:
     )
     FACEBOOK_CONTENT_HORIZON_DAYS = int(os.getenv('FACEBOOK_CONTENT_HORIZON_DAYS', 30))
     FACEBOOK_CONTENT_BATCH_DAYS = int(os.getenv('FACEBOOK_CONTENT_BATCH_DAYS', 7))
-    FACEBOOK_REQUIRE_APPROVAL = os.getenv('FACEBOOK_REQUIRE_APPROVAL', 'true').lower() == 'true'
+    FACEBOOK_AUTONOMOUS_MODE = os.getenv('FACEBOOK_AUTONOMOUS_MODE', 'true').lower() == 'true'
+    FACEBOOK_REQUIRE_APPROVAL = os.getenv('FACEBOOK_REQUIRE_APPROVAL', 'false').lower() == 'true'
     FACEBOOK_GENERATE_IMAGES = os.getenv('FACEBOOK_GENERATE_IMAGES', 'true').lower() == 'true'
     FACEBOOK_AI_GENERATION_TIMEOUT_SECONDS = int(os.getenv('FACEBOOK_AI_GENERATION_TIMEOUT_SECONDS', 12))
     FACEBOOK_AI_MAX_KEYS_PER_BATCH = int(os.getenv('FACEBOOK_AI_MAX_KEYS_PER_BATCH', 2))
+    FACEBOOK_TEST_POST_ON_DEPLOY = os.getenv('FACEBOOK_TEST_POST_ON_DEPLOY', 'true').lower() == 'true'
     
     # Schedule Configuration
     SCHEDULE_CONFIG = {
