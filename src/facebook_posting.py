@@ -15,7 +15,7 @@ logger.add("logs/facebook_posting.log", rotation="500 MB")
 
 CONTENT_STRATEGY_VERSION = 'creatifybd-autonomous-v3'
 MIN_QUALITY_SCORE = 8
-TEST_POST_UID = 'fb-autonomous-test-v1'
+TEST_POST_UID = 'fb-autonomous-test-v2'
 
 
 FACEBOOK_POST_HEADERS = [
@@ -64,6 +64,7 @@ class FacebookPoster:
             timeout=Config.FACEBOOK_AI_GENERATION_TIMEOUT_SECONDS
         )
         self.timezone = ZoneInfo(Config.SCHEDULER_TIMEZONE)
+        self._last_facebook_error = ''
 
     def _now(self):
         return datetime.now(self.timezone)
@@ -183,6 +184,16 @@ class FacebookPoster:
             'approval_required': Config.FACEBOOK_REQUIRE_APPROVAL and not Config.FACEBOOK_AUTONOMOUS_MODE,
             'first_scheduled_at': min(scheduled) if scheduled else None,
             'last_scheduled_at': max(scheduled) if scheduled else None,
+            'failed_rows': [
+                {
+                    'uid': str(row.get('uid') or ''),
+                    'approval_note': str(row.get('approval_note') or '')[:260],
+                    'image_status': str(row.get('image_status') or '')[:120],
+                    'post_id': str(row.get('post_id') or ''),
+                }
+                for row in rows
+                if self._status(row) == self.FAILED
+            ][:5],
         }
 
     def post_next_approved(self):
@@ -244,7 +255,10 @@ class FacebookPoster:
                 return True, post_id
 
             if image_bytes:
-                return self._post_photo(content_text, image_bytes, mime_type)
+                success, post_id = self._post_photo(content_text, image_bytes, mime_type)
+                if success:
+                    return success, post_id
+                logger.warning("Facebook photo post failed; retrying as text-only feed post")
 
             url = f"https://graph.facebook.com/{self.api_version}/{self.page_id}/feed"
             payload = {'message': content_text, 'access_token': self.access_token}
@@ -253,11 +267,14 @@ class FacebookPoster:
 
             response = requests.post(url, data=payload, timeout=20)
             if response.status_code >= 400:
-                logger.error(f"Facebook error: {response.status_code} - {response.text}")
+                self._last_facebook_error = self._safe_error(response.status_code, response.text)
+                logger.error(f"Facebook error: {self._last_facebook_error}")
                 return False, None
             result = response.json()
+            self._last_facebook_error = ''
             return True, result.get('id')
         except Exception as exc:
+            self._last_facebook_error = f'{type(exc).__name__}: {str(exc)[:160]}'
             logger.error(f"Facebook posting error: {exc}")
             return False, None
 
@@ -268,10 +285,17 @@ class FacebookPoster:
         data = {'caption': caption, 'access_token': self.access_token}
         response = requests.post(url, data=data, files=files, timeout=60)
         if response.status_code >= 400:
-            logger.error(f"Facebook photo error: {response.status_code} - {response.text}")
+            self._last_facebook_error = self._safe_error(response.status_code, response.text)
+            logger.error(f"Facebook photo error: {self._last_facebook_error}")
             return False, None
         result = response.json()
+        self._last_facebook_error = ''
         return True, result.get('post_id') or result.get('id')
+
+    @staticmethod
+    def _safe_error(status_code, text):
+        cleaned = str(text or '').replace('\n', ' ')[:260]
+        return f'HTTP {status_code}: {cleaned}'
 
     def _publish_sheet_row(self, worksheet, row, replacement_for=''):
         caption = str(row.get('caption') or '').strip()
@@ -309,7 +333,12 @@ class FacebookPoster:
             self._update_row(worksheet, row['row_number'], updates)
             return True
 
-        self._update_row_status(worksheet, row['row_number'], self.FAILED, 'Facebook API failed')
+        self._update_row_status(
+            worksheet,
+            row['row_number'],
+            self.FAILED,
+            self._last_facebook_error or 'Facebook API failed'
+        )
         return False
 
     def _generate_posts_for_slots(self, slots):
@@ -455,11 +484,7 @@ class FacebookPoster:
             'hook': 'A strong digital presence does not start with posting more',
             'takeaway': 'Fix clarity, trust, and next-step friction before scaling promotion.',
             'caption': caption,
-            'image_prompt': (
-                'Premium square editorial visual of a founder mapping a customer journey across '
-                'website, SEO, content, brand, social media, and ads; warm modern agency style; '
-                'no logos, no small text.'
-            ),
+            'image_prompt': '',
             'quality_score': 9,
         }
 
