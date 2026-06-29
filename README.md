@@ -225,4 +225,6 @@ PathshalaPro Team
 
 ---
 
+Deployment verification: Railway GitHub integration connected to main.
+
 **প্রথম সময় রান করার আগে .env ফাইল সেট করুন!**
