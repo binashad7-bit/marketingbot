@@ -261,6 +261,17 @@ class FacebookPostingTests(unittest.TestCase):
             3,
         )
 
+    def test_calendar_prompt_assigns_editorial_slot_briefs(self):
+        poster = FacebookPoster()
+        prompt = poster._calendar_prompt([
+            poster._now() + timedelta(days=1),
+            poster._now() + timedelta(days=1, hours=2),
+        ])
+
+        self.assertIn('Slot briefs:', prompt)
+        self.assertIn('image_prompt empty', prompt)
+        self.assertIn('editorial assignment', prompt)
+
 
 if __name__ == '__main__':
     unittest.main()

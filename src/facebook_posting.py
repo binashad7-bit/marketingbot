@@ -14,7 +14,7 @@ from src.personalization import GeminiClient
 
 logger.add("logs/facebook_posting.log", rotation="500 MB")
 
-CONTENT_STRATEGY_VERSION = 'creatifybd-global-v8'
+CONTENT_STRATEGY_VERSION = 'creatifybd-global-v9'
 MIN_QUALITY_SCORE = 9
 TEST_POST_UID = 'fb-autonomous-test-v2'
 CALENDAR_GENERATION_LOCK = threading.Lock()
@@ -584,7 +584,7 @@ class FacebookPoster:
 
     def _calendar_prompt(self, slots, repair_note=''):
         slot_lines = '\n'.join(
-            f"- {slot.isoformat(timespec='minutes')} ({slot.strftime('%A')})"
+            f"- {slot.isoformat(timespec='minutes')} ({slot.strftime('%A')}) | {self._slot_brief(slot)}"
             for slot in slots
         )
         repair_section = f'{repair_note}\n\n' if repair_note else ''
@@ -637,6 +637,12 @@ class FacebookPoster:
             '- Never attach a generic visual just because the schema has an image_prompt field.\n'
             '- Balance the calendar like a social media manager: authority, engagement, trust, reach, '
             'conversation, and eventual client intent should rotate naturally.\n\n'
+            'Slot briefs:\n'
+            '- Treat the brief beside each slot as the editorial assignment from the strategy lead.\n'
+            '- Keep the exact business idea fresh. Do not repeat the same audit, hook, framework, or CTA.\n'
+            '- If two slots in one batch share a pillar, use a different angle, buyer stage, and format.\n'
+            '- Respect "text-only" briefs by leaving image_prompt empty.\n'
+            '- Respect "visual" briefs only when the visual concept can be premium and specific.\n\n'
             'Quality bar for every post:\n'
             '- Open with a concrete, non-generic hook that names a real business tension.\n'
             '- Teach one useful idea with depth; avoid obvious advice like "post consistently".\n'
@@ -663,6 +669,23 @@ class FacebookPoster:
             f'Slots:\n{slot_lines}\n\n'
             f'Return valid JSON exactly like this shape: {json.dumps(schema)}'
         )
+
+    def _slot_brief(self, slot):
+        profiles = [
+            'text-only founder POV; pillar=founder_pov; goal=trust; write a sharp owner-level lesson about digital growth decisions; image_prompt empty',
+            'text-only audience conversation; pillar=social_growth; goal=engagement; ask a practical question after teaching one useful idea; image_prompt empty',
+            'visual education; pillar=website_conversion; goal=lead_intent; use a concrete page/offer/CTA framework; image_prompt required only if premium and specific',
+            'text-only SEO/content strategy; pillar=SEO; goal=educate; explain search intent, buyer questions, service pages, or proof; image_prompt empty',
+            'text-only client hunting; pillar=client_hunting; goal=demand_creation; teach how businesses can attract better-fit clients without spam; image_prompt empty',
+            'visual brand/creative direction; pillar=branding; goal=trust; premium campaign-art direction is allowed; avoid generic laptop scenes',
+            'text-only paid ads readiness; pillar=paid_ads; goal=educate; diagnose offer, landing page, tracking, creative, or follow-up readiness; image_prompt empty',
+            'visual tasteful trend or meme; pillar=trend; goal=engagement; use World Cup/teamwork/tactics only if it teaches a business lesson with brand taste',
+            'text-only mini audit; pillar=website_conversion; goal=lead_intent; make it specific, short, and comment-worthy; image_prompt empty',
+            'text-only operating system; pillar=social_growth; goal=trust; teach a repeatable content or community management habit; image_prompt empty',
+        ]
+        day_index = (slot.date() - date(2026, 1, 1)).days
+        time_minutes = slot.hour * 60 + slot.minute
+        return profiles[(day_index * 3 + time_minutes // 90) % len(profiles)]
 
     def _clean_generated_post(self, post):
         cleaned = {
