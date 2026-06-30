@@ -13,7 +13,7 @@ from src.personalization import GeminiClient, outreach_personalizer
 
 logger.add("logs/facebook_posting.log", rotation="500 MB")
 
-CONTENT_STRATEGY_VERSION = 'creatifybd-autonomous-v4'
+CONTENT_STRATEGY_VERSION = 'creatifybd-global-v6'
 MIN_QUALITY_SCORE = 9
 TEST_POST_UID = 'fb-autonomous-test-v2'
 
@@ -58,7 +58,10 @@ class FacebookPoster:
         self.page_id = Config.FACEBOOK_PAGE_ID
         self.access_token = Config.FACEBOOK_PAGE_ACCESS_TOKEN or Config.FACEBOOK_ACCESS_TOKEN
         self.api_version = "v25.0"
-        social_keys = Config.GEMINI_API_KEYS[:max(1, Config.FACEBOOK_AI_MAX_KEYS_PER_BATCH)]
+        # Invalid or exhausted imported keys are skipped by GeminiClient. Keep the
+        # full pool available so prompt planning and visual QA do not fail merely
+        # because the first few configured keys are stale.
+        social_keys = Config.GEMINI_API_KEYS
         self.gemini = GeminiClient(
             api_keys=social_keys,
             timeout=Config.FACEBOOK_AI_GENERATION_TIMEOUT_SECONDS
@@ -318,12 +321,18 @@ class FacebookPoster:
         image_prompt = str(row.get('image_prompt') or '').strip()
         image_status = 'not_requested'
         if Config.FACEBOOK_GENERATE_IMAGES and image_prompt:
-            try:
-                image_bytes, mime_type = self.gemini.generate_image(self._image_prompt(image_prompt))
-                image_status = 'generated'
-            except Exception as exc:
-                image_status = f'failed: {type(exc).__name__}'
-                logger.warning(f"Facebook image generation skipped: {exc}")
+            image_bytes, mime_type, image_status = self._generate_approved_image(
+                image_prompt,
+                caption,
+            )
+            if not image_bytes:
+                self._update_row_status(
+                    worksheet,
+                    row['row_number'],
+                    self.FAILED,
+                    f'Image QA failed: {image_status}',
+                )
+                return False
 
         success, post_id = self.post_to_facebook(
             caption,
@@ -350,6 +359,65 @@ class FacebookPoster:
             self._last_facebook_error or 'Facebook API failed'
         )
         return False
+
+    def _generate_approved_image(self, image_prompt, caption=''):
+        base_prompt = self._prepare_image_prompt(image_prompt, caption)
+        last_status = 'not_generated'
+        attempts = max(1, Config.FACEBOOK_IMAGE_MAX_ATTEMPTS)
+
+        for attempt in range(1, attempts + 1):
+            try:
+                image_bytes, mime_type = self.gemini.generate_image(
+                    base_prompt,
+                    provider=Config.FACEBOOK_IMAGE_PROVIDER,
+                )
+                review = self.gemini.review_image(image_bytes, mime_type, base_prompt)
+                score = self._coerce_score(review.get('score'))
+                decision = str(review.get('decision') or '').strip().lower()
+                critical = review.get('critical_failures') or []
+                last_status = f'attempt {attempt}: {decision}, score {score}/10'
+                logger.info(f'Facebook image QA {last_status}; critical={critical}')
+                if (
+                    decision == 'pass'
+                    and score >= Config.FACEBOOK_IMAGE_MIN_QA_SCORE
+                    and not critical
+                ):
+                    return image_bytes, mime_type, f'approved {score}/10 on attempt {attempt}'
+            except Exception as exc:
+                last_status = f'attempt {attempt}: {type(exc).__name__}'
+                logger.warning(f'Facebook image generation/QA failed: {exc}')
+
+        return None, 'image/jpeg', last_status
+
+    def _prepare_image_prompt(self, image_prompt, caption):
+        """Solve the visual concept with a low-cost text pass before one image call."""
+        planning_prompt = (
+            'Act as an executive creative director writing the final production brief for one '
+            'premium, international-standard social campaign image. The next step is expensive, '
+            'so solve ambiguity now and optimize for a strong first generation.\n\n'
+            f'Post caption:\n{caption[:1800]}\n\n'
+            f'Initial art direction:\n{image_prompt[:1400]}\n\n'
+            'Choose one specific visual thesis that communicates the post without text. Prefer the '
+            'lowest-artifact scene capable of expressing the idea: product-led commercial still life, '
+            'architectural/environmental photography, or an over-the-shoulder human scene with no '
+            'visible face or prominent hands. Never choose a generic person beside a laptop, a random '
+            'desk, floating icons, glowing data streams, split-screen before/after layouts, or obvious '
+            '3D-render aesthetics. Specify subject placement, physical interaction, lens, camera angle, '
+            'lighting diagram, real materials, micro-imperfections, color system, negative space, and '
+            'the exact relationship between each prop and the marketing lesson. Remove every object '
+            'that does not carry meaning. Require physically coherent geometry, reflections, shadows, '
+            'depth, and screen perspective. No text, letters, numbers, logos, watermarks, fake UI copy, '
+            'or copyrighted marks. Return JSON with one field named final_prompt containing one concise '
+            '130-170 word production-ready prompt. Keep it on one line and do not include alternatives.'
+        )
+        try:
+            result = self.gemini.generate_json(planning_prompt, max_output_tokens=2400)
+            planned = str(result.get('final_prompt') or '').strip()
+            if len(planned.split()) >= 100:
+                return self._image_prompt(planned)
+        except Exception as exc:
+            logger.warning(f'Facebook image prompt planning fallback: {exc}')
+        return self._image_prompt(image_prompt)
 
     def _generate_posts_for_slots(self, slots):
         if outreach_personalizer.enabled:
@@ -391,9 +459,9 @@ class FacebookPoster:
             f'Agency: {Config.AGENCY_NAME}\n'
             f'Website: {Config.AGENCY_WEBSITE}\n'
             f'Services: {Config.AGENCY_SERVICES}\n'
-            'Audience: founders, local business owners, service businesses, ecommerce owners, '
-            'and growing Bangladeshi/English-speaking SMEs who need better websites, SEO, '
-            'content, social media, branding, and paid acquisition.\n\n'
+            'Audience: international founders, professional-service firms, ecommerce brands, '
+            'and growth-focused small and mid-sized businesses across English-speaking markets '
+            'that need better websites, SEO, content, social media, branding, and paid acquisition.\n\n'
             'Role: act as a top-tier creative agency team in one person: brand strategist, '
             'SEO strategist, performance marketer, social media manager, creative director, '
             'copy chief, and client hunter. You are not making filler posts. You are building '
@@ -418,7 +486,8 @@ class FacebookPoster:
             '- Sound like a smart human founder/strategist, not an AI assistant or motivational page.\n'
             '- No fabricated results, case studies, clients, awards, numbers, or guarantees.\n'
             '- No hard selling while creatifybd.com is unfinished. Soft CTA only.\n'
-            '- Use polished Bangla-English only when natural; otherwise use crisp English.\n'
+            '- Write exclusively in polished international English. Never use Bangla or Banglish.\n'
+            '- Avoid region-specific assumptions unless a post explicitly targets that market.\n'
             '- End with a comment-worthy question or low-friction reflection.\n'
             '- Score your own post. Only output posts that deserve 9/10 or higher.\n\n'
             'Image prompt quality bar:\n'
@@ -426,6 +495,10 @@ class FacebookPoster:
             '- Mention exact scene, subject, composition, camera/lighting style, material details, mood, '
             'color palette, and why it matches the post idea.\n'
             '- Prefer realistic editorial photography, high-end 3D editorial, or tasteful campaign art.\n'
+            '- Human subjects require anatomically correct faces, natural gaze direction, realistic eyes, '
+            'skin, hair, hands, posture, and interaction with every object in the frame.\n'
+            '- Avoid close-up faces or prominent hands unless they are essential to the concept; prefer '
+            'object-led campaign photography, over-the-shoulder scenes, or wider environmental compositions.\n'
             '- No readable words, no letters, no numbers, no UI text, no logos, no distorted charts, no clutter.\n'
             '- Avoid cheap clipart, flat generic icons, random laptops, fake brand marks, and messy small objects.\n\n'
             f'Slots:\n{slot_lines}\n\n'
@@ -447,6 +520,8 @@ class FacebookPoster:
             self._quality_score(cleaned),
             self._coerce_score(post.get('quality_score'))
         )
+        if any('\u0980' <= char <= '\u09ff' for char in cleaned['caption']):
+            cleaned['quality_score'] = 0
         return cleaned
 
     def _should_reset_calendar(self, rows):
@@ -711,10 +786,15 @@ class FacebookPoster:
             "professional designer, or commercial photographer, not a quick AI image. "
             "Use a clean, intentional composition with strong focal hierarchy, realistic material detail, "
             "controlled lighting, refined color palette, and enough negative space for a social feed crop. "
+            "Make every face anatomically correct with natural eye alignment and gaze direction; make hands, "
+            "fingers, skin, hair, body proportions, object contact, screen geometry, reflections, shadows, and "
+            "depth physically coherent. Avoid a prominent face or hands unless the concept truly requires them. "
             "Make the image directly relevant to the marketing lesson, using visual metaphor only when it is clear. "
             "No readable text, no letters, no numbers, no fake logos, no copyrighted marks, no tiny UI copy, "
             "no distorted charts, no clutter, no cheap stock-photo smiles, no generic clipart. "
-            "Prefer premium editorial photography or high-end campaign-style 3D editorial."
+            "Prefer premium object-led editorial photography, wider environmental commercial photography, "
+            "or high-end campaign-style 3D editorial. The result must withstand close inspection and contain "
+            "no visible AI-generation cues."
         )
 
     def _combine(self, day, hhmm):

@@ -1,4 +1,5 @@
 import ipaddress
+import base64
 import json
 import re
 from datetime import datetime, timezone
@@ -72,6 +73,11 @@ class GeminiClient:
                 if response.status_code in (401, 403, 429) or response.status_code >= 500:
                     last_error = RuntimeError(f'Gemini HTTP {response.status_code}')
                     continue
+                if response.status_code >= 400:
+                    last_error = RuntimeError(
+                        f'Gemini HTTP {response.status_code}: {response.text[:300]}'
+                    )
+                    continue
                 response.raise_for_status()
                 parts = response.json()['candidates'][0]['content']['parts']
                 text = ''.join(part.get('text', '') for part in parts).strip()
@@ -81,7 +87,7 @@ class GeminiClient:
 
         raise RuntimeError(f'All Gemini keys failed: {last_error}')
 
-    def generate_image(self, prompt, aspect_ratio='1:1'):
+    def generate_image(self, prompt, aspect_ratio='1:1', provider='auto'):
         """Generate one image and return raw bytes plus mime type.
 
         The response shape for image-generation models can vary, so this parser
@@ -90,8 +96,12 @@ class GeminiClient:
         if not self.available and not Config.OPENAI_API_KEY:
             raise RuntimeError('No image generation API keys configured')
 
+        provider = str(provider or 'auto').lower()
+        if provider not in {'auto', 'gemini', 'openai'}:
+            raise ValueError(f'Unsupported image provider: {provider}')
+
         last_error = None
-        if self.available:
+        if provider in {'auto', 'gemini'} and self.available:
             url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
             payload = {
                 'model': Config.GEMINI_IMAGE_MODEL,
@@ -126,7 +136,7 @@ class GeminiClient:
                 except (ValueError, requests.RequestException) as exc:
                     last_error = exc
 
-        if Config.OPENAI_API_KEY:
+        if provider in {'auto', 'openai'} and Config.OPENAI_API_KEY:
             try:
                 return self._generate_openai_image(prompt)
             except Exception as exc:
@@ -139,9 +149,66 @@ class GeminiClient:
 
         raise RuntimeError(f'All Gemini image keys failed: {last_error}')
 
-    def _generate_openai_image(self, prompt):
-        import base64
+    def review_image(self, image_bytes, mime_type, prompt):
+        """Return a strict commercial-quality review for a generated social image."""
+        if not self.available:
+            raise RuntimeError('No Gemini API key configured for visual QA')
 
+        url = (
+            'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'{self.model}:generateContent'
+        )
+        rubric = (
+            'You are the uncompromising executive creative director and senior photo retoucher '
+            'for an international agency. Review this generated image against its art direction. '
+            'Reject it if a careful viewer could reasonably identify it as AI-generated. Inspect '
+            'facial anatomy, gaze direction, eye alignment, hands and fingers, skin and hair texture, '
+            'body proportions, object geometry, screens and reflections, lighting consistency, depth, '
+            'composition, commercial relevance, fake text, logos, watermarks, and visual artifacts. '
+            'A face, gaze, hand, warped object, fake UI, or obvious synthetic texture problem is an '
+            'automatic critical failure. A score of 9 means publication-ready for a premium global '
+            'creative agency; do not inflate scores. Return JSON only with: score (1-10 integer), '
+            'decision (pass or reject), critical_failures (array), issues (array), strengths (array), '
+            'and prompt_correction (a concise instruction for the next generation). Keep each array '
+            'to at most three short items and prompt_correction below 80 words.\n\n'
+            f'Original art direction:\n{prompt}'
+        )
+        encoded = base64.b64encode(image_bytes).decode('ascii')
+        payload = {
+            'contents': [{
+                'role': 'user',
+                'parts': [
+                    {'text': rubric},
+                    {'inlineData': {'mimeType': mime_type, 'data': encoded}},
+                ],
+            }],
+            'generationConfig': {
+                'temperature': 0.1,
+                'maxOutputTokens': 2400,
+                'responseMimeType': 'application/json',
+            },
+        }
+        last_error = None
+        for key in self._ordered_keys():
+            try:
+                response = self.session.post(
+                    url,
+                    headers={'x-goog-api-key': key, 'Content-Type': 'application/json'},
+                    json=payload,
+                    timeout=max(self.timeout, 60),
+                )
+                if response.status_code in (401, 403, 429) or response.status_code >= 500:
+                    last_error = RuntimeError(f'Gemini visual QA HTTP {response.status_code}')
+                    continue
+                response.raise_for_status()
+                parts = response.json()['candidates'][0]['content']['parts']
+                text = ''.join(part.get('text', '') for part in parts).strip()
+                return self._parse_json(text)
+            except (KeyError, IndexError, ValueError, requests.RequestException) as exc:
+                last_error = exc
+        raise RuntimeError(f'Visual QA failed: {last_error}')
+
+    def _generate_openai_image(self, prompt):
         response = self.session.post(
             'https://api.openai.com/v1/images/generations',
             headers={

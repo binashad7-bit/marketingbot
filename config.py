@@ -88,7 +88,7 @@ class Config:
     GEMINI_IMAGE_MODEL = os.getenv('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image')
     GEMINI_TIMEOUT_SECONDS = int(os.getenv('GEMINI_TIMEOUT_SECONDS', 30))
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    OPENAI_IMAGE_MODEL = os.getenv('OPENAI_IMAGE_MODEL', 'gpt-image-1')
+    OPENAI_IMAGE_MODEL = os.getenv('OPENAI_IMAGE_MODEL', 'gpt-image-1.5')
     OPENAI_IMAGE_SIZE = os.getenv('OPENAI_IMAGE_SIZE', '1024x1024')
     OPENAI_IMAGE_QUALITY = os.getenv('OPENAI_IMAGE_QUALITY', 'high')
     ENABLE_AI_PERSONALIZATION = os.getenv(
@@ -214,6 +214,9 @@ class Config:
     FACEBOOK_AUTONOMOUS_MODE = os.getenv('FACEBOOK_AUTONOMOUS_MODE', 'true').lower() == 'true'
     FACEBOOK_REQUIRE_APPROVAL = os.getenv('FACEBOOK_REQUIRE_APPROVAL', 'false').lower() == 'true'
     FACEBOOK_GENERATE_IMAGES = os.getenv('FACEBOOK_GENERATE_IMAGES', 'true').lower() == 'true'
+    FACEBOOK_IMAGE_PROVIDER = os.getenv('FACEBOOK_IMAGE_PROVIDER', 'openai').lower()
+    FACEBOOK_IMAGE_MAX_ATTEMPTS = int(os.getenv('FACEBOOK_IMAGE_MAX_ATTEMPTS', 1))
+    FACEBOOK_IMAGE_MIN_QA_SCORE = int(os.getenv('FACEBOOK_IMAGE_MIN_QA_SCORE', 9))
     FACEBOOK_AI_GENERATION_TIMEOUT_SECONDS = int(os.getenv('FACEBOOK_AI_GENERATION_TIMEOUT_SECONDS', 12))
     FACEBOOK_AI_MAX_KEYS_PER_BATCH = int(os.getenv('FACEBOOK_AI_MAX_KEYS_PER_BATCH', 2))
     FACEBOOK_TEST_POST_ON_DEPLOY = os.getenv('FACEBOOK_TEST_POST_ON_DEPLOY', 'true').lower() == 'true'
