@@ -209,6 +209,58 @@ class FacebookPostingTests(unittest.TestCase):
         worksheet.append_rows.assert_called_once()
         self.assertEqual(len(worksheet.append_rows.call_args.args[0]), 1)
 
+    def test_visual_portfolio_mix_keeps_text_only_posts(self):
+        poster = FacebookPoster()
+        posts = [
+            {
+                'format': 'text',
+                'pillar': 'founder_pov',
+                'caption': 'Before you post more, ask whether the page helps customers decide.',
+                'image_prompt': 'Generic founder image',
+            },
+            {
+                'format': 'checklist',
+                'pillar': 'SEO',
+                'caption': 'Use this checklist to audit the buyer questions your website answers.',
+                'image_prompt': 'Generic checklist image',
+            },
+            {
+                'format': 'meme',
+                'pillar': 'trend',
+                'caption': 'A tasteful trend post needs the lesson, not just the joke.',
+                'image_prompt': 'Specific meme visual',
+            },
+            {
+                'format': 'carousel_idea',
+                'pillar': 'website_conversion',
+                'caption': 'A conversion carousel can show the path from confusion to clarity.',
+                'image_prompt': 'Specific carousel visual',
+            },
+            {
+                'format': 'audit_prompt',
+                'pillar': 'client_hunting',
+                'caption': 'Before you pitch, audit the visible friction in the prospect journey.',
+                'image_prompt': 'Generic audit visual',
+            },
+            {
+                'format': 'short_story',
+                'pillar': 'social_growth',
+                'caption': 'A page grows when people feel their real business problem was named.',
+                'image_prompt': 'Generic social image',
+            },
+        ]
+
+        mixed = poster._apply_visual_portfolio_mix(posts)
+
+        self.assertEqual(
+            sum(1 for post in mixed if str(post.get('image_prompt') or '').strip()),
+            3,
+        )
+        self.assertEqual(
+            sum(1 for post in mixed if not str(post.get('image_prompt') or '').strip()),
+            3,
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

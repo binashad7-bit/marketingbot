@@ -14,7 +14,7 @@ from src.personalization import GeminiClient
 
 logger.add("logs/facebook_posting.log", rotation="500 MB")
 
-CONTENT_STRATEGY_VERSION = 'creatifybd-global-v7'
+CONTENT_STRATEGY_VERSION = 'creatifybd-global-v8'
 MIN_QUALITY_SCORE = 9
 TEST_POST_UID = 'fb-autonomous-test-v2'
 CALENDAR_GENERATION_LOCK = threading.Lock()
@@ -557,6 +557,7 @@ class FacebookPoster:
                 low_quality = self._low_quality_indexes(cleaned, len(slots))
                 if low_quality:
                     raise ValueError(f'AI posts failed quality gate at indexes {low_quality}')
+                cleaned = self._apply_visual_portfolio_mix(cleaned[:len(slots)])
                 return cleaned[:len(slots)]
             except Exception as exc:
                 logger.warning(f"AI Facebook calendar fallback: {exc}")
@@ -597,7 +598,7 @@ class FacebookPoster:
                     'hook': 'specific opening idea, not clickbait',
                     'takeaway': 'the practical lesson the audience can apply',
                     'caption': '130-220 words, human, insightful, useful, no fake claims',
-                    'image_prompt': '90-140 word premium art direction prompt, no text/logos',
+                    'image_prompt': 'empty string for text-only posts; 90-140 word premium art direction only when the visual materially improves the post',
                     'quality_score': '1-10'
                 }
             ]
@@ -626,6 +627,16 @@ class FacebookPoster:
             '6. Client-hunting education: how businesses can attract better-fit clients.\n'
             '7. Tasteful trend/meme posts: World Cup/teamwork/tactics analogies are allowed, '
             'but no team logos, no match scores, no fake breaking news, no cheap jokes.\n\n'
+            'Portfolio strategy for organic growth:\n'
+            '- Do not make every post an image post. A professional page needs a deliberate mix.\n'
+            '- For each batch, make 45-65% of posts text-only with image_prompt set to an empty string.\n'
+            '- Text-only posts should include founder POV, contrarian insight, mini-audit prompts, '
+            'comment-worthy questions, customer decision frameworks, or sharp operational lessons.\n'
+            '- Use images only when the visual itself adds strategic value: premium campaign art, '
+            'tasteful meme, carousel concept, brand/website audit visual, or high-value educational graphic.\n'
+            '- Never attach a generic visual just because the schema has an image_prompt field.\n'
+            '- Balance the calendar like a social media manager: authority, engagement, trust, reach, '
+            'conversation, and eventual client intent should rotate naturally.\n\n'
             'Quality bar for every post:\n'
             '- Open with a concrete, non-generic hook that names a real business tension.\n'
             '- Teach one useful idea with depth; avoid obvious advice like "post consistently".\n'
@@ -638,7 +649,7 @@ class FacebookPoster:
             '- End with a comment-worthy question or low-friction reflection.\n'
             '- Score your own post. Only output posts that deserve 9/10 or higher.\n\n'
             f'{repair_section}'
-            'Image prompt quality bar:\n'
+            'Image prompt quality bar, only for posts that truly need images:\n'
             '- Describe a premium designer/photographer-level square visual, not a generic stock image.\n'
             '- Mention exact scene, subject, composition, camera/lighting style, material details, mood, '
             'color palette, and why it matches the post idea.\n'
@@ -670,6 +681,53 @@ class FacebookPoster:
         if any('\u0980' <= char <= '\u09ff' for char in cleaned['caption']):
             cleaned['quality_score'] = 0
         return cleaned
+
+    def _apply_visual_portfolio_mix(self, posts):
+        if not posts:
+            return posts
+
+        max_visuals = self._max_visual_posts(len(posts))
+        visual_indexes = [
+            index for index, post in enumerate(posts)
+            if str(post.get('image_prompt') or '').strip()
+        ]
+        if len(visual_indexes) <= max_visuals:
+            return posts
+
+        candidates = sorted(
+            visual_indexes,
+            key=lambda index: self._text_only_suitability(posts[index]),
+            reverse=True,
+        )
+        for index in candidates[:len(visual_indexes) - max_visuals]:
+            posts[index]['image_prompt'] = ''
+        return posts
+
+    @staticmethod
+    def _max_visual_posts(count):
+        if count <= 1:
+            return 1
+        if count <= 3:
+            return 1
+        return max(1, count // 2)
+
+    @staticmethod
+    def _text_only_suitability(post):
+        format_name = str(post.get('format') or '').lower()
+        pillar = str(post.get('pillar') or '').lower()
+        caption = str(post.get('caption') or '').lower()
+        score = 0
+        if any(term in format_name for term in ('text', 'audit', 'checklist', 'short_story')):
+            score += 4
+        if any(term in pillar for term in ('founder', 'seo', 'client_hunting', 'social_growth', 'website')):
+            score += 2
+        if '?' in caption:
+            score += 1
+        if any(term in caption for term in ('framework', 'checklist', 'audit', 'ask yourself', 'before you')):
+            score += 1
+        if any(term in format_name for term in ('meme', 'carousel')):
+            score -= 4
+        return score
 
     def _should_reset_calendar(self, rows):
         return any(
