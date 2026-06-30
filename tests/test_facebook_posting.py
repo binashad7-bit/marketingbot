@@ -61,6 +61,18 @@ class FacebookPostingTests(unittest.TestCase):
 
         self.assertIsNone(poster._first_publishable_due(rows, now))
 
+    def test_posting_path_does_not_mutate_calendar(self):
+        poster = FacebookPoster()
+        worksheet = Mock()
+        with (
+            patch.object(poster, '_worksheet', return_value=worksheet),
+            patch.object(poster, '_rows', return_value=[]),
+            patch.object(poster, 'ensure_content_calendar') as ensure_calendar,
+        ):
+            self.assertFalse(poster.post_next_approved())
+
+        ensure_calendar.assert_not_called()
+
     def test_image_review_requires_every_quality_dimension(self):
         review = {
             'score': 9,

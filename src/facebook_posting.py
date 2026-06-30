@@ -216,7 +216,6 @@ class FacebookPoster:
         if not worksheet:
             return False
 
-        self.ensure_content_calendar()
         rows = self._rows(worksheet)
         now = self._now()
 
