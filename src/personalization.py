@@ -87,45 +87,87 @@ class GeminiClient:
         The response shape for image-generation models can vary, so this parser
         walks the JSON tree and accepts the first inline image payload it finds.
         """
-        if not self.available:
-            raise RuntimeError('No Gemini API keys configured')
-
-        url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
-        payload = {
-            'model': Config.GEMINI_IMAGE_MODEL,
-            'input': [{'type': 'text', 'text': prompt}],
-            'response_format': {
-                'type': 'image',
-                'mime_type': 'image/jpeg',
-                'aspect_ratio': aspect_ratio,
-                'image_size': '1K'
-            },
-            'generation_config': {
-                'thinking_level': 'minimal'
-            }
-        }
+        if not self.available and not Config.OPENAI_API_KEY:
+            raise RuntimeError('No image generation API keys configured')
 
         last_error = None
-        for key in self._ordered_keys():
+        if self.available:
+            url = 'https://generativelanguage.googleapis.com/v1beta/interactions'
+            payload = {
+                'model': Config.GEMINI_IMAGE_MODEL,
+                'input': [{'type': 'text', 'text': prompt}],
+                'response_format': {
+                    'type': 'image',
+                    'mime_type': 'image/jpeg',
+                    'aspect_ratio': aspect_ratio,
+                    'image_size': '1K'
+                },
+                'generation_config': {
+                    'thinking_level': 'minimal'
+                }
+            }
+
+            for key in self._ordered_keys():
+                try:
+                    response = self.session.post(
+                        url,
+                        headers={'x-goog-api-key': key, 'Content-Type': 'application/json'},
+                        json=payload,
+                        timeout=max(self.timeout, 60)
+                    )
+                    if response.status_code in (401, 403, 429) or response.status_code >= 500:
+                        last_error = RuntimeError(f'Gemini image HTTP {response.status_code}')
+                        continue
+                    response.raise_for_status()
+                    image = self._find_inline_image(response.json())
+                    if image:
+                        return image
+                    raise ValueError('No inline image returned by Gemini')
+                except (ValueError, requests.RequestException) as exc:
+                    last_error = exc
+
+        if Config.OPENAI_API_KEY:
             try:
-                response = self.session.post(
-                    url,
-                    headers={'x-goog-api-key': key, 'Content-Type': 'application/json'},
-                    json=payload,
-                    timeout=max(self.timeout, 60)
-                )
-                if response.status_code in (401, 403, 429) or response.status_code >= 500:
-                    last_error = RuntimeError(f'Gemini image HTTP {response.status_code}')
-                    continue
-                response.raise_for_status()
-                image = self._find_inline_image(response.json())
-                if image:
-                    return image
-                raise ValueError('No inline image returned by Gemini')
-            except (ValueError, requests.RequestException) as exc:
-                last_error = exc
+                return self._generate_openai_image(prompt)
+            except Exception as exc:
+                if last_error:
+                    raise RuntimeError(
+                        f'Gemini and OpenAI image generation failed: '
+                        f'Gemini={last_error}; OpenAI={exc}'
+                    ) from exc
+                raise
 
         raise RuntimeError(f'All Gemini image keys failed: {last_error}')
+
+    def _generate_openai_image(self, prompt):
+        import base64
+
+        response = self.session.post(
+            'https://api.openai.com/v1/images/generations',
+            headers={
+                'Authorization': f'Bearer {Config.OPENAI_API_KEY}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'model': Config.OPENAI_IMAGE_MODEL,
+                'prompt': prompt,
+                'size': Config.OPENAI_IMAGE_SIZE,
+                'quality': Config.OPENAI_IMAGE_QUALITY
+            },
+            timeout=max(self.timeout, 120)
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f'OpenAI image HTTP {response.status_code}: {response.text[:500]}')
+        data = response.json()
+        image = (data.get('data') or [{}])[0]
+        if image.get('b64_json'):
+            return base64.b64decode(image['b64_json']), 'image/png'
+        if image.get('url'):
+            image_response = self.session.get(image['url'], timeout=60)
+            image_response.raise_for_status()
+            mime_type = image_response.headers.get('Content-Type', 'image/png').split(';', 1)[0]
+            return image_response.content, mime_type
+        raise ValueError('No image returned by OpenAI')
 
     @staticmethod
     def _parse_json(text):
