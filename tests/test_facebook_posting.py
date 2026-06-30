@@ -172,6 +172,43 @@ class FacebookPostingTests(unittest.TestCase):
         self.assertEqual(poster.gemini.generate_json.call_count, 2)
         self.assertIn('repair pass', poster.gemini.generate_json.call_args.args[0])
 
+    def test_calendar_batch_failure_retries_individual_slots(self):
+        poster = FacebookPoster()
+        worksheet = Mock(title='FacebookPosts')
+        slots = [
+            poster._now() + timedelta(days=1),
+            poster._now() + timedelta(days=1, hours=2),
+        ]
+        post = {
+            'audience_stage': 'problem_aware',
+            'marketing_goal': 'educate',
+            'pillar': 'website_conversion',
+            'format': 'checklist',
+            'hook': 'Before scaling content, audit the page experience',
+            'takeaway': 'Fix clarity and trust before increasing acquisition volume.',
+            'caption': 'A practical strategic caption that already passed quality review.',
+            'image_prompt': 'Premium editorial desk scene with conversion audit materials, no text.',
+            'quality_score': 9,
+        }
+
+        with (
+            patch.object(poster, '_worksheet', return_value=worksheet),
+            patch.object(poster, '_rows', return_value=[]),
+            patch.object(poster, '_planned_slots', return_value=slots),
+            patch.object(
+                poster,
+                '_generate_posts_for_slots',
+                side_effect=[RuntimeError('bad batch'), [post], RuntimeError('bad slot')]
+            ) as generate,
+        ):
+            result = poster.ensure_content_calendar(horizon_days=1)
+
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(result['skipped'], 1)
+        self.assertEqual(generate.call_count, 3)
+        worksheet.append_rows.assert_called_once()
+        self.assertEqual(len(worksheet.append_rows.call_args.args[0]), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

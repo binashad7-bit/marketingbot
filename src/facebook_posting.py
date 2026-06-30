@@ -144,25 +144,47 @@ class FacebookPoster:
             return {'created': 0, 'worksheet': worksheet.title}
 
         created = 0
+        skipped = 0
         batch_size = max(1, Config.FACEBOOK_CONTENT_BATCH_DAYS * Config.FACEBOOK_POSTS_PER_DAY)
+
+        def append_generated_rows(generated_rows):
+            nonlocal reset_required
+            if not generated_rows:
+                return
+            if reset_required:
+                worksheet.clear()
+                worksheet.append_row(FACEBOOK_POST_HEADERS)
+                if preserved_rows:
+                    worksheet.append_rows(preserved_rows, value_input_option='USER_ENTERED')
+                reset_required = False
+            worksheet.append_rows(generated_rows, value_input_option='USER_ENTERED')
+
         for start in range(0, len(slots), batch_size):
             batch = slots[start:start + batch_size]
-            posts = self._generate_posts_for_slots(batch)
-            batch_rows = []
-            for scheduled_at, post in zip(batch, posts):
-                batch_rows.append(self._sheet_row(scheduled_at, post))
-                created += 1
-            if batch_rows:
-                if reset_required:
-                    worksheet.clear()
-                    worksheet.append_row(FACEBOOK_POST_HEADERS)
-                    if preserved_rows:
-                        worksheet.append_rows(preserved_rows, value_input_option='USER_ENTERED')
-                    reset_required = False
-                worksheet.append_rows(batch_rows, value_input_option='USER_ENTERED')
+            try:
+                posts = self._generate_posts_for_slots(batch)
+                batch_rows = []
+                for scheduled_at, post in zip(batch, posts):
+                    batch_rows.append(self._sheet_row(scheduled_at, post))
+                    created += 1
+                append_generated_rows(batch_rows)
+                continue
+            except RuntimeError as exc:
+                logger.warning(f'Facebook calendar batch failed; retrying slots individually: {exc}')
 
-        logger.info(f"Facebook content calendar updated: created={created}")
-        return {'created': created, 'worksheet': worksheet.title}
+            for scheduled_at in batch:
+                try:
+                    posts = self._generate_posts_for_slots([scheduled_at])
+                    append_generated_rows([self._sheet_row(scheduled_at, posts[0])])
+                    created += 1
+                except RuntimeError as exc:
+                    skipped += 1
+                    logger.warning(
+                        f'Facebook calendar skipped slot {scheduled_at.isoformat(timespec="minutes")}: {exc}'
+                    )
+
+        logger.info(f"Facebook content calendar updated: created={created}, skipped={skipped}")
+        return {'created': created, 'skipped': skipped, 'worksheet': worksheet.title}
 
     def calendar_status(self):
         """Return public-safe metadata about the connected Facebook calendar sheet."""
@@ -660,7 +682,11 @@ class FacebookPoster:
             score += 1
         if any(word in lower for word in ('website', 'seo', 'content', 'brand', 'ads', 'landing page', 'customer', 'trust')):
             score += 2
-        if any(word in lower for word in ('check', 'review', 'ask', 'start', 'before', 'track', 'rewrite', 'remove')):
+        if any(word in lower for word in (
+            'check', 'review', 'ask', 'start', 'before', 'track', 'rewrite', 'remove',
+            'audit', 'map', 'diagnose', 'measure', 'prioritize', 'compare', 'simplify',
+            'clarify', 'test', 'prove', 'align', 'fix'
+        )):
             score += 2
         if str(post.get('hook') or '').strip():
             score += 1
