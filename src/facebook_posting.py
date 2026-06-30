@@ -13,8 +13,8 @@ from src.personalization import GeminiClient, outreach_personalizer
 
 logger.add("logs/facebook_posting.log", rotation="500 MB")
 
-CONTENT_STRATEGY_VERSION = 'creatifybd-autonomous-v3'
-MIN_QUALITY_SCORE = 8
+CONTENT_STRATEGY_VERSION = 'creatifybd-autonomous-v4'
+MIN_QUALITY_SCORE = 9
 TEST_POST_UID = 'fb-autonomous-test-v2'
 
 
@@ -116,9 +116,16 @@ class FacebookPoster:
         end_date = now.date() + timedelta(days=horizon_days - 1)
         existing_rows = self._rows(worksheet)
         if self._should_reset_calendar(existing_rows):
+            preserved_rows = [
+                self._row_values(row)
+                for row in existing_rows
+                if self._status(row) in {self.POSTED, self.FAILED, self.REPLACED}
+            ]
             worksheet.clear()
             worksheet.append_row(FACEBOOK_POST_HEADERS)
-            existing_rows = []
+            if preserved_rows:
+                worksheet.append_rows(preserved_rows, value_input_option='USER_ENTERED')
+            existing_rows = self._rows(worksheet)
 
         existing = {
             str(row.get('scheduled_at', '')).strip()
@@ -374,8 +381,8 @@ class FacebookPoster:
                     'format': 'text | meme | carousel_idea | short_story | checklist | audit_prompt',
                     'hook': 'specific opening idea, not clickbait',
                     'takeaway': 'the practical lesson the audience can apply',
-                    'caption': '110-190 words, human, useful, no fake claims',
-                    'image_prompt': 'square editorial visual prompt, no small text, no logos',
+                    'caption': '130-220 words, human, insightful, useful, no fake claims',
+                    'image_prompt': '90-140 word premium art direction prompt, no text/logos',
                     'quality_score': '1-10'
                 }
             ]
@@ -388,9 +395,13 @@ class FacebookPoster:
             'and growing Bangladeshi/English-speaking SMEs who need better websites, SEO, '
             'content, social media, branding, and paid acquisition.\n\n'
             'Role: act as a top-tier creative agency team in one person: brand strategist, '
-            'SEO strategist, performance marketer, social media manager, copy chief, and client '
-            'hunter. You are not making filler posts. You are building trust, authority, and '
-            'organic demand for CreatifyBD before the website launch is complete.\n\n'
+            'SEO strategist, performance marketer, social media manager, creative director, '
+            'copy chief, and client hunter. You are not making filler posts. You are building '
+            'trust, authority, and organic demand for CreatifyBD before the website launch is complete.\n\n'
+            'Brand direction: smart, practical, premium, founder-led, quietly confident. '
+            'Never sound like a generic AI marketing page. Write like a strategist who has '
+            'sat with real business owners and understands conversion friction, buyer psychology, '
+            'local trust, content distribution, SEO intent, creative testing, and follow-up systems.\n\n'
             'Strategic content pillars:\n'
             '1. Website conversion audits: clarity, trust, mobile speed, CTA, offer-match.\n'
             '2. SEO and helpful content: customer questions, service pages, local intent, proof.\n'
@@ -401,15 +412,22 @@ class FacebookPoster:
             '7. Tasteful trend/meme posts: World Cup/teamwork/tactics analogies are allowed, '
             'but no team logos, no match scores, no fake breaking news, no cheap jokes.\n\n'
             'Quality bar for every post:\n'
-            '- Open with a concrete, non-generic hook.\n'
+            '- Open with a concrete, non-generic hook that names a real business tension.\n'
             '- Teach one useful idea with depth; avoid obvious advice like "post consistently".\n'
-            '- Include a practical mental model, checklist, mistake, or audit prompt.\n'
-            '- Sound like a smart human founder/strategist, not an AI assistant.\n'
+            '- Include a practical mental model, mini-framework, mistake, or audit prompt.\n'
+            '- Sound like a smart human founder/strategist, not an AI assistant or motivational page.\n'
             '- No fabricated results, case studies, clients, awards, numbers, or guarantees.\n'
             '- No hard selling while creatifybd.com is unfinished. Soft CTA only.\n'
             '- Use polished Bangla-English only when natural; otherwise use crisp English.\n'
             '- End with a comment-worthy question or low-friction reflection.\n'
-            '- Score your own post. Only output posts that deserve 8/10 or higher.\n\n'
+            '- Score your own post. Only output posts that deserve 9/10 or higher.\n\n'
+            'Image prompt quality bar:\n'
+            '- Describe a premium designer/photographer-level square visual, not a generic stock image.\n'
+            '- Mention exact scene, subject, composition, camera/lighting style, material details, mood, '
+            'color palette, and why it matches the post idea.\n'
+            '- Prefer realistic editorial photography, high-end 3D editorial, or tasteful campaign art.\n'
+            '- No readable words, no letters, no numbers, no UI text, no logos, no distorted charts, no clutter.\n'
+            '- Avoid cheap clipart, flat generic icons, random laptops, fake brand marks, and messy small objects.\n\n'
             f'Slots:\n{slot_lines}\n\n'
             f'Return valid JSON exactly like this shape: {json.dumps(schema)}'
         )
@@ -432,16 +450,11 @@ class FacebookPoster:
         return cleaned
 
     def _should_reset_calendar(self, rows):
-        if not rows:
-            return False
-        posted_or_approved = {
-            self.POSTED.lower(),
-            self.APPROVED.lower(),
-        }
-        has_committed_rows = any(self._status(row).lower() in posted_or_approved for row in rows)
-        if has_committed_rows:
-            return False
-        return any(str(row.get('strategy_version') or '') != CONTENT_STRATEGY_VERSION for row in rows)
+        return any(
+            self._status(row) in {self.PENDING, self.APPROVED, self.DENIED}
+            and str(row.get('strategy_version') or '') != CONTENT_STRATEGY_VERSION
+            for row in rows
+        )
 
     def _planned_slots(self, start_date, end_date):
         slots = []
@@ -686,12 +699,22 @@ class FacebookPoster:
             now,
         ]
 
+    @staticmethod
+    def _row_values(row):
+        return [row.get(header, '') for header in FACEBOOK_POST_HEADERS]
+
     def _image_prompt(self, prompt):
         return (
             f"{prompt}\n\n"
-            "Create a polished square Facebook visual for CreatifyBD's business audience. "
-            "No tiny text, no fake logos, no copyrighted team marks, no clutter. "
-            "Use a professional agency editorial style that can accompany a marketing lesson."
+            "Create a premium square Facebook visual for CreatifyBD's business audience. "
+            "The result must look like it was art-directed by a senior creative director, "
+            "professional designer, or commercial photographer, not a quick AI image. "
+            "Use a clean, intentional composition with strong focal hierarchy, realistic material detail, "
+            "controlled lighting, refined color palette, and enough negative space for a social feed crop. "
+            "Make the image directly relevant to the marketing lesson, using visual metaphor only when it is clear. "
+            "No readable text, no letters, no numbers, no fake logos, no copyrighted marks, no tiny UI copy, "
+            "no distorted charts, no clutter, no cheap stock-photo smiles, no generic clipart. "
+            "Prefer premium editorial photography or high-end campaign-style 3D editorial."
         )
 
     def _combine(self, day, hhmm):

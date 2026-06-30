@@ -88,9 +88,9 @@ class Config:
     GEMINI_IMAGE_MODEL = os.getenv('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image')
     GEMINI_TIMEOUT_SECONDS = int(os.getenv('GEMINI_TIMEOUT_SECONDS', 30))
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    OPENAI_IMAGE_MODEL = os.getenv('OPENAI_IMAGE_MODEL', 'gpt-image-1-mini')
+    OPENAI_IMAGE_MODEL = os.getenv('OPENAI_IMAGE_MODEL', 'gpt-image-1')
     OPENAI_IMAGE_SIZE = os.getenv('OPENAI_IMAGE_SIZE', '1024x1024')
-    OPENAI_IMAGE_QUALITY = os.getenv('OPENAI_IMAGE_QUALITY', 'low')
+    OPENAI_IMAGE_QUALITY = os.getenv('OPENAI_IMAGE_QUALITY', 'high')
     ENABLE_AI_PERSONALIZATION = os.getenv(
         'ENABLE_AI_PERSONALIZATION',
         'true' if GEMINI_API_KEYS else 'false'

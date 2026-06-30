@@ -340,6 +340,54 @@ def health_check():
     }), 200
 
 
+@app.route('/privacy-policy', methods=['GET'])
+def privacy_policy():
+    """Public privacy policy for Meta app review and page publishing."""
+    html = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CreatifyBD MarketingBot Privacy Policy</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; color: #1f2a25; background: #f7f8f6; line-height: 1.6; }
+    main { max-width: 840px; margin: 0 auto; padding: 40px 20px 64px; }
+    h1 { font-size: 32px; line-height: 1.2; margin: 0 0 8px; }
+    h2 { font-size: 20px; margin-top: 28px; }
+    p, li { font-size: 16px; }
+    .updated { color: #5c6b63; margin-bottom: 28px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>CreatifyBD MarketingBot Privacy Policy</h1>
+    <p class="updated">Last updated: June 30, 2026</p>
+    <p>CreatifyBD MarketingBot is an internal automation tool used by CreatifyBD to manage public Facebook Page publishing, lead organization, reporting, and marketing workflow operations.</p>
+    <h2>Information We Use</h2>
+    <p>The tool may process business contact details, public business profile information, website information, social media page metadata, campaign performance data, and Facebook Page publishing data that CreatifyBD is authorized to access.</p>
+    <h2>How We Use Information</h2>
+    <ul>
+      <li>To prepare, schedule, and publish content on CreatifyBD-owned social media pages.</li>
+      <li>To maintain marketing calendars, workflow logs, and operational reports.</li>
+      <li>To research public business information for lawful B2B marketing operations.</li>
+      <li>To improve content quality, relevance, and campaign performance.</li>
+    </ul>
+    <h2>Facebook Platform Data</h2>
+    <p>The tool uses Facebook permissions only for CreatifyBD-owned assets and authorized Page management tasks. We do not sell Facebook Platform data. We do not use Facebook Platform data for unrelated third-party advertising networks.</p>
+    <h2>Data Sharing</h2>
+    <p>We do not sell personal data. Data may be processed by service providers used to operate the tool, including hosting, spreadsheets, email systems, analytics, and AI providers, only for CreatifyBD business operations.</p>
+    <h2>Retention and Deletion</h2>
+    <p>Operational records are retained only as long as needed for business, legal, security, and reporting purposes. To request deletion of data associated with CreatifyBD MarketingBot, contact us using the email below.</p>
+    <h2>Contact</h2>
+    <p>For privacy questions or data deletion requests, contact: creatifybd@gmail.com</p>
+  </main>
+</body>
+</html>
+"""
+    return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
 @app.route('/stats', methods=['GET'])
 def get_statistics():
     """বর্তমান পরিসংখ্যান পাওয়া"""
