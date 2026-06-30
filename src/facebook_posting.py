@@ -228,6 +228,9 @@ class FacebookPoster:
         rows = self._rows(worksheet)
         existing = next((row for row in rows if str(row.get('uid') or '') == TEST_POST_UID), None)
         if existing:
+            if self._status(existing) == self.FAILED:
+                success = self._publish_sheet_row(worksheet, existing)
+                return {'posted': bool(success), 'uid': TEST_POST_UID, 'status': self._status(existing)}
             return {'posted': False, 'reason': 'test already recorded', 'status': self._status(existing)}
 
         now = self._now()
