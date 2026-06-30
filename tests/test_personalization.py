@@ -17,6 +17,10 @@ class FakeResponse:
     def json(self):
         return self._payload
 
+    @property
+    def text(self):
+        return json.dumps(self._payload)
+
 
 class FakeSession:
     def __init__(self, responses):
@@ -46,6 +50,24 @@ class StaticClient:
 
 
 class PersonalizationTests(unittest.TestCase):
+    def test_openai_json_provider_uses_structured_chat_completion(self):
+        expected = {'posts': [{'caption': 'Specific insight'}]}
+        session = FakeSession([
+            FakeResponse(200, {
+                'choices': [{'message': {'content': json.dumps(expected)}}]
+            })
+        ])
+        client = GeminiClient(api_keys=[], session=session)
+
+        with unittest.mock.patch('src.personalization.Config.OPENAI_API_KEY', 'test-key'):
+            result = client.generate_json('prompt', provider='openai')
+
+        self.assertEqual(result, expected)
+        self.assertEqual(session.calls[0][0], 'https://api.openai.com/v1/chat/completions')
+        payload = session.calls[0][1]['json']
+        self.assertEqual(payload['response_format'], {'type': 'json_object'})
+        self.assertIn('max_completion_tokens', payload)
+
     def test_gemini_rotates_after_quota_error(self):
         result = {
             'subject': 'A relevant idea',

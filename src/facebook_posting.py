@@ -9,11 +9,11 @@ import requests
 from loguru import logger
 
 from config import Config
-from src.personalization import GeminiClient, outreach_personalizer
+from src.personalization import GeminiClient
 
 logger.add("logs/facebook_posting.log", rotation="500 MB")
 
-CONTENT_STRATEGY_VERSION = 'creatifybd-global-v6'
+CONTENT_STRATEGY_VERSION = 'creatifybd-global-v7'
 MIN_QUALITY_SCORE = 9
 TEST_POST_UID = 'fb-autonomous-test-v2'
 
@@ -118,17 +118,15 @@ class FacebookPoster:
         now = self._now()
         end_date = now.date() + timedelta(days=horizon_days - 1)
         existing_rows = self._rows(worksheet)
-        if self._should_reset_calendar(existing_rows):
+        reset_required = self._should_reset_calendar(existing_rows)
+        preserved_rows = []
+        if reset_required:
             preserved_rows = [
                 self._row_values(row)
                 for row in existing_rows
                 if self._status(row) in {self.POSTED, self.FAILED, self.REPLACED}
             ]
-            worksheet.clear()
-            worksheet.append_row(FACEBOOK_POST_HEADERS)
-            if preserved_rows:
-                worksheet.append_rows(preserved_rows, value_input_option='USER_ENTERED')
-            existing_rows = self._rows(worksheet)
+            existing_rows = []
 
         existing = {
             str(row.get('scheduled_at', '')).strip()
@@ -138,6 +136,7 @@ class FacebookPoster:
 
         slots = [
             scheduled_at for scheduled_at in self._planned_slots(now.date(), end_date)
+            if scheduled_at > now + timedelta(minutes=15)
             if scheduled_at.isoformat(timespec='minutes') not in existing
         ]
 
@@ -154,6 +153,12 @@ class FacebookPoster:
                 batch_rows.append(self._sheet_row(scheduled_at, post))
                 created += 1
             if batch_rows:
+                if reset_required:
+                    worksheet.clear()
+                    worksheet.append_row(FACEBOOK_POST_HEADERS)
+                    if preserved_rows:
+                        worksheet.append_rows(preserved_rows, value_input_option='USER_ENTERED')
+                    reset_required = False
                 worksheet.append_rows(batch_rows, value_input_option='USER_ENTERED')
 
         logger.info(f"Facebook content calendar updated: created={created}")
@@ -263,14 +268,16 @@ class FacebookPoster:
         try:
             if not self.page_id or not self.access_token:
                 post_id = self._queue_post(content_text, image_url=image_url, image_bytes=image_bytes)
-                logger.warning(f"Facebook credential missing; queued post {post_id}")
-                return True, post_id
+                self._last_facebook_error = f'Facebook credential missing; queued locally as {post_id}'
+                logger.warning(self._last_facebook_error)
+                return False, None
 
             if image_bytes:
                 success, post_id = self._post_photo(content_text, image_bytes, mime_type)
                 if success:
                     return success, post_id
-                logger.warning("Facebook photo post failed; retrying as text-only feed post")
+                logger.warning("Facebook photo post failed; text-only fallback is disabled")
+                return False, None
 
             url = f"https://graph.facebook.com/{self.api_version}/{self.page_id}/feed"
             payload = {'message': content_text, 'access_token': self.access_token}
@@ -362,7 +369,7 @@ class FacebookPoster:
     def _generate_approved_image(self, image_prompt, caption=''):
         base_prompt = self._prepare_image_prompt(image_prompt, caption)
         last_status = 'not_generated'
-        attempts = max(1, Config.FACEBOOK_IMAGE_MAX_ATTEMPTS)
+        attempts = 1
 
         for attempt in range(1, attempts + 1):
             try:
@@ -370,23 +377,46 @@ class FacebookPoster:
                     base_prompt,
                     provider=Config.FACEBOOK_IMAGE_PROVIDER,
                 )
-                review = self.gemini.review_image(image_bytes, mime_type, base_prompt)
+                review = self.gemini.review_image(
+                    image_bytes,
+                    mime_type,
+                    base_prompt,
+                    provider=Config.FACEBOOK_TEXT_PROVIDER,
+                )
                 score = self._coerce_score(review.get('score'))
                 decision = str(review.get('decision') or '').strip().lower()
                 critical = review.get('critical_failures') or []
                 last_status = f'attempt {attempt}: {decision}, score {score}/10'
                 logger.info(f'Facebook image QA {last_status}; critical={critical}')
-                if (
-                    decision == 'pass'
-                    and score >= Config.FACEBOOK_IMAGE_MIN_QA_SCORE
-                    and not critical
-                ):
+                if self._image_review_passes(review):
                     return image_bytes, mime_type, f'approved {score}/10 on attempt {attempt}'
             except Exception as exc:
                 last_status = f'attempt {attempt}: {type(exc).__name__}'
                 logger.warning(f'Facebook image generation/QA failed: {exc}')
 
         return None, 'image/jpeg', last_status
+
+    @staticmethod
+    def _image_review_passes(review):
+        required_dimensions = {
+            'photorealism',
+            'anatomy_geometry',
+            'lighting_materials',
+            'concept_relevance',
+            'composition',
+            'brand_distinctiveness',
+        }
+        dimensions = review.get('dimension_scores') or {}
+        dimension_scores = {
+            name: FacebookPoster._coerce_score(dimensions.get(name))
+            for name in required_dimensions
+        }
+        return (
+            str(review.get('decision') or '').strip().lower() == 'pass'
+            and FacebookPoster._coerce_score(review.get('score')) >= Config.FACEBOOK_IMAGE_MIN_QA_SCORE
+            and not (review.get('critical_failures') or [])
+            and all(score >= Config.FACEBOOK_IMAGE_MIN_QA_SCORE for score in dimension_scores.values())
+        )
 
     def _prepare_image_prompt(self, image_prompt, caption):
         """Solve the visual concept with a low-cost text pass before one image call."""
@@ -410,7 +440,11 @@ class FacebookPoster:
             '130-170 word production-ready prompt. Keep it on one line and do not include alternatives.'
         )
         try:
-            result = self.gemini.generate_json(planning_prompt, max_output_tokens=2400)
+            result = self.gemini.generate_json(
+                planning_prompt,
+                max_output_tokens=2400,
+                provider=Config.FACEBOOK_TEXT_PROVIDER,
+            )
             planned = str(result.get('final_prompt') or '').strip()
             if len(planned.split()) >= 100:
                 return self._image_prompt(planned)
@@ -419,18 +453,28 @@ class FacebookPoster:
         return self._image_prompt(image_prompt)
 
     def _generate_posts_for_slots(self, slots):
-        if outreach_personalizer.enabled:
+        if self.gemini.available or Config.OPENAI_API_KEY:
             try:
-                result = self.gemini.generate_json(self._calendar_prompt(slots), max_output_tokens=12000)
+                result = self.gemini.generate_json(
+                    self._calendar_prompt(slots),
+                    max_output_tokens=12000,
+                    provider=Config.FACEBOOK_TEXT_PROVIDER,
+                )
                 posts = result.get('posts') or []
                 cleaned = [self._clean_generated_post(post) for post in posts]
-                if len(cleaned) >= len(slots):
-                    for index, post in enumerate(cleaned[:len(slots)]):
-                        if int(post.get('quality_score') or 0) < MIN_QUALITY_SCORE:
-                            cleaned[index] = self._fallback_post(slots[index], index)
-                    return cleaned[:len(slots)]
+                if len(cleaned) < len(slots):
+                    raise ValueError(f'AI returned {len(cleaned)} posts for {len(slots)} slots')
+                low_quality = [
+                    index for index, post in enumerate(cleaned[:len(slots)])
+                    if int(post.get('quality_score') or 0) < MIN_QUALITY_SCORE
+                ]
+                if low_quality:
+                    raise ValueError(f'AI posts failed quality gate at indexes {low_quality}')
+                return cleaned[:len(slots)]
             except Exception as exc:
                 logger.warning(f"AI Facebook calendar fallback: {exc}")
+                if Config.ENVIRONMENT == 'production' and Config.FACEBOOK_AUTONOMOUS_MODE:
+                    raise RuntimeError('AI calendar generation failed; static fallback disabled') from exc
 
         return [self._fallback_post(slot, index) for index, slot in enumerate(slots)]
 
@@ -515,10 +559,9 @@ class FacebookPoster:
             'caption': str(post.get('caption') or '').strip()[:2200],
             'image_prompt': str(post.get('image_prompt') or '').strip()[:1400],
         }
-        cleaned['quality_score'] = max(
-            self._quality_score(cleaned),
-            self._coerce_score(post.get('quality_score'))
-        )
+        heuristic_score = self._quality_score(cleaned)
+        model_score = self._coerce_score(post.get('quality_score'))
+        cleaned['quality_score'] = min(heuristic_score, model_score) if model_score else heuristic_score
         if any('\u0980' <= char <= '\u09ff' for char in cleaned['caption']):
             cleaned['quality_score'] = 0
         return cleaned

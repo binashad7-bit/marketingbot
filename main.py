@@ -60,7 +60,10 @@ def _request_admin_token():
     auth_header = request.headers.get('Authorization', '')
     if auth_header.lower().startswith('bearer '):
         return auth_header.split(' ', 1)[1].strip()
-    return request.headers.get('X-Admin-Token') or request.args.get('token')
+    header_token = request.headers.get('X-Admin-Token')
+    if header_token or Config.ENVIRONMENT == 'production':
+        return header_token
+    return request.args.get('token')
 
 
 def require_admin(func):
@@ -265,16 +268,25 @@ def init_scheduler():
             360,
             first_run_delay_minutes=2
         )
-        post_times = Config.FACEBOOK_POST_TIMES[:Config.FACEBOOK_POSTS_PER_DAY]
-        for index, post_time in enumerate(post_times, start=1):
-            hour, minute = _parse_hhmm(post_time, 14, 0)
-            add_cron_job(
-                f'facebook_posting_{index}',
-                f'Facebook approved post slot {index}',
+        if Config.FACEBOOK_AUTONOMOUS_MODE:
+            add_interval_job(
+                'facebook_due_posting',
+                'Publish the next due autonomous Facebook post',
                 facebook_poster.post_next_approved,
-                hour,
-                minute
+                10,
+                first_run_delay_minutes=2,
             )
+        else:
+            post_times = Config.FACEBOOK_POST_TIMES[:Config.FACEBOOK_POSTS_PER_DAY]
+            for index, post_time in enumerate(post_times, start=1):
+                hour, minute = _parse_hhmm(post_time, 14, 0)
+                add_cron_job(
+                    f'facebook_posting_{index}',
+                    f'Facebook approved post slot {index}',
+                    facebook_poster.post_next_approved,
+                    hour,
+                    minute
+                )
         if Config.FACEBOOK_TEST_POST_ON_DEPLOY:
             scheduler.add_job(
                 func=run_scheduled_job,
@@ -542,7 +554,7 @@ def lead_collection_dashboard():
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PathshalaPro Lead Monitor</title>
+  <title>CreatifyBD Lead Monitor</title>
   <style>
     :root { color-scheme: light; font-family: Inter, Arial, sans-serif; }
     body { margin: 0; background: #f4f7f6; color: #17211d; }
@@ -569,7 +581,7 @@ def lead_collection_dashboard():
 <body>
   <header>
     <div>
-      <h1>PathshalaPro Lead Monitor</h1>
+      <h1>CreatifyBD Lead Monitor</h1>
       <div class="status" id="status">Loading workflow...</div>
     </div>
     <div class="status" id="updated"></div>
