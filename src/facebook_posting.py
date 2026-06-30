@@ -2,6 +2,7 @@ import json
 import mimetypes
 import os
 import tempfile
+import threading
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,7 @@ logger.add("logs/facebook_posting.log", rotation="500 MB")
 CONTENT_STRATEGY_VERSION = 'creatifybd-global-v7'
 MIN_QUALITY_SCORE = 9
 TEST_POST_UID = 'fb-autonomous-test-v2'
+CALENDAR_GENERATION_LOCK = threading.Lock()
 
 
 FACEBOOK_POST_HEADERS = [
@@ -110,6 +112,16 @@ class FacebookPoster:
 
     def ensure_content_calendar(self, horizon_days=None):
         """Keep a 30-day autonomous content calendar in Google Sheets."""
+        if not CALENDAR_GENERATION_LOCK.acquire(blocking=False):
+            logger.info('Facebook content calendar generation already running; skipping overlap')
+            return {'created': 0, 'skipped': 0, 'busy': True, 'worksheet': None}
+
+        try:
+            return self._ensure_content_calendar(horizon_days=horizon_days)
+        finally:
+            CALENDAR_GENERATION_LOCK.release()
+
+    def _ensure_content_calendar(self, horizon_days=None):
         worksheet = self._worksheet()
         if not worksheet:
             return {'created': 0, 'worksheet': None}
@@ -118,6 +130,7 @@ class FacebookPoster:
         now = self._now()
         end_date = now.date() + timedelta(days=horizon_days - 1)
         existing_rows = self._rows(worksheet)
+        existing_rows, removed_duplicates = self._dedupe_active_calendar_rows(worksheet, existing_rows)
         reset_required = self._should_reset_calendar(existing_rows)
         preserved_rows = []
         if reset_required:
@@ -141,7 +154,12 @@ class FacebookPoster:
         ]
 
         if not slots:
-            return {'created': 0, 'worksheet': worksheet.title}
+            return {
+                'created': 0,
+                'skipped': 0,
+                'removed_duplicates': removed_duplicates,
+                'worksheet': worksheet.title,
+            }
 
         created = 0
         skipped = 0
@@ -183,8 +201,51 @@ class FacebookPoster:
                         f'Facebook calendar skipped slot {scheduled_at.isoformat(timespec="minutes")}: {exc}'
                     )
 
-        logger.info(f"Facebook content calendar updated: created={created}, skipped={skipped}")
-        return {'created': created, 'skipped': skipped, 'worksheet': worksheet.title}
+        logger.info(
+            f"Facebook content calendar updated: created={created}, "
+            f"skipped={skipped}, removed_duplicates={removed_duplicates}"
+        )
+        return {
+            'created': created,
+            'skipped': skipped,
+            'removed_duplicates': removed_duplicates,
+            'worksheet': worksheet.title,
+        }
+
+    def _dedupe_active_calendar_rows(self, worksheet, rows):
+        seen = set()
+        kept_rows = []
+        removed = 0
+        for row in rows:
+            status = self._status(row)
+            version = str(row.get('strategy_version') or '').strip()
+            scheduled_at = str(row.get('scheduled_at') or '').strip()
+            uid = str(row.get('uid') or '').strip()
+            key = scheduled_at or uid
+            is_active_v7 = (
+                status in {self.PENDING, self.APPROVED, self.DENIED}
+                and version == CONTENT_STRATEGY_VERSION
+                and key
+            )
+            if is_active_v7:
+                if key in seen:
+                    removed += 1
+                    continue
+                seen.add(key)
+            kept_rows.append(row)
+
+        if not removed:
+            return rows, 0
+
+        worksheet.clear()
+        worksheet.append_row(FACEBOOK_POST_HEADERS)
+        if kept_rows:
+            worksheet.append_rows(
+                [self._row_values(row) for row in kept_rows],
+                value_input_option='USER_ENTERED'
+            )
+        logger.warning(f'Facebook calendar deduped active rows: removed={removed}')
+        return self._rows(worksheet), removed
 
     def calendar_status(self):
         """Return public-safe metadata about the connected Facebook calendar sheet."""
