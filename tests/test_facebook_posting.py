@@ -110,6 +110,68 @@ class FacebookPostingTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 poster._generate_posts_for_slots([poster._now() + timedelta(days=1)])
 
+    def test_low_quality_calendar_posts_get_one_repair_pass(self):
+        poster = FacebookPoster()
+        poster.gemini = Mock(available=True)
+        strong_caption = (
+            'Before a founder spends more on reach, the website should make the buying decision easier. '
+            'A simple review can expose where trust is leaking: unclear service language, weak proof, slow '
+            'mobile pages, a buried contact path, or content that explains features without showing the '
+            'customer outcome. Start with one page and check it like a serious buyer who has five tabs open. '
+            'What problem is solved, why is this team credible, what happens next, and what concern remains '
+            'unanswered? Fixing those answers often makes every later SEO post, social campaign, and paid ad '
+            'work harder because the audience lands on clarity instead of confusion.'
+        )
+        repaired_caption = (
+            'If a business page feels active but not persuasive, the problem is usually not frequency. It is '
+            'the missing bridge between content and customer decision. Review the last ten posts and mark each '
+            'one as awareness, trust, comparison, or action. If most posts only announce services, the audience '
+            'has little reason to save, comment, or remember the brand. Start building a weekly pattern: one '
+            'post that diagnoses a real website issue, one that teaches an SEO or content decision, one that '
+            'shows how trust is created before a buyer contacts you. Which decision should your next post help '
+            'a customer make with more confidence?'
+        )
+        poster.gemini.generate_json.side_effect = [
+            {'posts': [
+                {
+                    'caption': strong_caption,
+                    'hook': 'Before a founder spends more on reach',
+                    'takeaway': 'Review trust, clarity, and next-step friction before scaling promotion.',
+                    'image_prompt': 'Premium editorial still life of a homepage audit desk with clear decision notes, no text.',
+                    'quality_score': 10,
+                },
+                {
+                    'caption': 'Generic marketing advice.',
+                    'hook': 'Generic hook',
+                    'takeaway': 'Generic takeaway',
+                    'image_prompt': 'Generic image',
+                    'quality_score': 10,
+                },
+            ]},
+            {'posts': [
+                {
+                    'caption': repaired_caption,
+                    'hook': 'If a business page feels active but not persuasive',
+                    'takeaway': 'Map posts to customer decisions instead of posting service announcements.',
+                    'image_prompt': 'Premium overhead campaign photograph of a social calendar mapped to buyer decisions, no text.',
+                    'quality_score': 10,
+                },
+            ]},
+        ]
+
+        slots = [
+            poster._now() + timedelta(days=1),
+            poster._now() + timedelta(days=1, hours=2),
+        ]
+
+        posts = poster._generate_posts_for_slots(slots)
+
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(posts[0]['caption'], strong_caption)
+        self.assertEqual(posts[1]['caption'], repaired_caption)
+        self.assertEqual(poster.gemini.generate_json.call_count, 2)
+        self.assertIn('repair pass', poster.gemini.generate_json.call_args.args[0])
+
 
 if __name__ == '__main__':
     unittest.main()

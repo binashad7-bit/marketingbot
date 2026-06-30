@@ -454,19 +454,24 @@ class FacebookPoster:
     def _generate_posts_for_slots(self, slots):
         if self.gemini.available or Config.OPENAI_API_KEY:
             try:
-                result = self.gemini.generate_json(
-                    self._calendar_prompt(slots),
-                    max_output_tokens=12000,
-                    provider=Config.FACEBOOK_TEXT_PROVIDER,
-                )
-                posts = result.get('posts') or []
-                cleaned = [self._clean_generated_post(post) for post in posts]
-                if len(cleaned) < len(slots):
-                    raise ValueError(f'AI returned {len(cleaned)} posts for {len(slots)} slots')
-                low_quality = [
-                    index for index, post in enumerate(cleaned[:len(slots)])
-                    if int(post.get('quality_score') or 0) < MIN_QUALITY_SCORE
-                ]
+                cleaned = self._generate_ai_posts(slots)
+                repair_indexes = self._low_quality_indexes(cleaned, len(slots))
+                if repair_indexes:
+                    repair_slots = [slots[index] for index in repair_indexes]
+                    repaired = self._generate_ai_posts(
+                        repair_slots,
+                        repair_note=(
+                            'This is a repair pass. Previous drafts for these slots failed the '
+                            'quality gate. Produce deeper 130-220 word posts with a practical '
+                            'framework, checklist, owner-level diagnosis, or concrete action. '
+                            'English only, no generic advice, no filler, and self-score honestly.'
+                        ),
+                    )
+                    for offset, index in enumerate(repair_indexes):
+                        if offset < len(repaired):
+                            cleaned[index] = repaired[offset]
+
+                low_quality = self._low_quality_indexes(cleaned, len(slots))
                 if low_quality:
                     raise ValueError(f'AI posts failed quality gate at indexes {low_quality}')
                 return cleaned[:len(slots)]
@@ -477,11 +482,28 @@ class FacebookPoster:
 
         return [self._fallback_post(slot, index) for index, slot in enumerate(slots)]
 
-    def _calendar_prompt(self, slots):
+    def _generate_ai_posts(self, slots, repair_note=''):
+        result = self.gemini.generate_json(
+            self._calendar_prompt(slots, repair_note=repair_note),
+            max_output_tokens=12000,
+            provider=Config.FACEBOOK_TEXT_PROVIDER,
+        )
+        posts = result.get('posts') or []
+        return [self._clean_generated_post(post) for post in posts]
+
+    @staticmethod
+    def _low_quality_indexes(posts, expected_count):
+        return [
+            index for index in range(expected_count)
+            if index >= len(posts) or int(posts[index].get('quality_score') or 0) < MIN_QUALITY_SCORE
+        ]
+
+    def _calendar_prompt(self, slots, repair_note=''):
         slot_lines = '\n'.join(
             f"- {slot.isoformat(timespec='minutes')} ({slot.strftime('%A')})"
             for slot in slots
         )
+        repair_section = f'{repair_note}\n\n' if repair_note else ''
         schema = {
             'posts': [
                 {
@@ -532,6 +554,7 @@ class FacebookPoster:
             '- Avoid region-specific assumptions unless a post explicitly targets that market.\n'
             '- End with a comment-worthy question or low-friction reflection.\n'
             '- Score your own post. Only output posts that deserve 9/10 or higher.\n\n'
+            f'{repair_section}'
             'Image prompt quality bar:\n'
             '- Describe a premium designer/photographer-level square visual, not a generic stock image.\n'
             '- Mention exact scene, subject, composition, camera/lighting style, material details, mood, '
