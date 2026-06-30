@@ -210,7 +210,7 @@ class Config:
         ['10:00', '14:30', '20:30']
     )
     FACEBOOK_CONTENT_HORIZON_DAYS = int(os.getenv('FACEBOOK_CONTENT_HORIZON_DAYS', 30))
-    FACEBOOK_CONTENT_BATCH_DAYS = int(os.getenv('FACEBOOK_CONTENT_BATCH_DAYS', 7))
+    FACEBOOK_CONTENT_BATCH_DAYS = int(os.getenv('FACEBOOK_CONTENT_BATCH_DAYS', 2))
     FACEBOOK_AUTONOMOUS_MODE = os.getenv('FACEBOOK_AUTONOMOUS_MODE', 'true').lower() == 'true'
     FACEBOOK_REQUIRE_APPROVAL = os.getenv('FACEBOOK_REQUIRE_APPROVAL', 'false').lower() == 'true'
     FACEBOOK_GENERATE_IMAGES = os.getenv('FACEBOOK_GENERATE_IMAGES', 'true').lower() == 'true'

@@ -145,17 +145,16 @@ class FacebookPoster:
             return {'created': 0, 'worksheet': worksheet.title}
 
         created = 0
-        rows_to_append = []
         batch_size = max(1, Config.FACEBOOK_CONTENT_BATCH_DAYS * Config.FACEBOOK_POSTS_PER_DAY)
         for start in range(0, len(slots), batch_size):
             batch = slots[start:start + batch_size]
             posts = self._generate_posts_for_slots(batch)
+            batch_rows = []
             for scheduled_at, post in zip(batch, posts):
-                rows_to_append.append(self._sheet_row(scheduled_at, post))
+                batch_rows.append(self._sheet_row(scheduled_at, post))
                 created += 1
-
-        if rows_to_append:
-            worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
+            if batch_rows:
+                worksheet.append_rows(batch_rows, value_input_option='USER_ENTERED')
 
         logger.info(f"Facebook content calendar updated: created={created}")
         return {'created': created, 'worksheet': worksheet.title}
